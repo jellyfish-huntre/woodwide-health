@@ -505,11 +505,10 @@ def _decompress_bundled_data() -> bool:
         return False
     processed_dir = Path("data/processed")
     processed_dir.mkdir(parents=True, exist_ok=True)
-    # Decompress only the first subject to stay within Streamlit Cloud disk limits
-    cf = compressed_files[0]
-    out = processed_dir / cf.stem  # strips .lzma → .pkl
-    if not out.exists():
-        out.write_bytes(lzma.decompress(cf.read_bytes()))
+    for cf in compressed_files:
+        out = processed_dir / cf.stem  # strips .lzma → .pkl
+        if not out.exists():
+            out.write_bytes(lzma.decompress(cf.read_bytes()))
     return True
 
 
