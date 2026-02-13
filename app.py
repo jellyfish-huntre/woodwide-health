@@ -25,6 +25,7 @@ load_dotenv()
 
 from src.detectors.woodwide import WoodWideDetector, DetectionResult
 from src.detectors.isolation_forest_detector import IsolationForestDetector
+from src.embeddings.api_client import MockAPIClient
 from src.embeddings.generate import send_windows_to_woodwide
 from src.ingestion.preprocess import PPGDaLiaPreprocessor
 from streamlit_helpers import (
@@ -517,11 +518,11 @@ def generate_sample_csv() -> str:
     # Ensure sufficient exercise data for detector training
     activities = [
         (0, 60, 1),      # 0-1 min: Sitting
-        (60, 180, 2),    # 1-3 min: Cycling (120s = good exercise data)
+        (60, 180, 4),    # 1-3 min: Cycling
         (180, 240, 1),   # 3-4 min: Sitting
-        (240, 360, 3),   # 4-6 min: Walking (120s = more exercise data)
+        (240, 360, 7),   # 4-6 min: Walking
         (360, 420, 1),   # 6-7 min: Sitting
-        (420, 540, 2),   # 7-9 min: Cycling (120s = more exercise)
+        (420, 540, 4),   # 7-9 min: Cycling
         (540, 600, 1),   # 9-10 min: Sitting
     ]
 
@@ -553,11 +554,11 @@ def generate_sample_csv() -> str:
             hr_bpm = 72 + np.random.randn() * 3  # Resting HR
             ppg_baseline = 0.0
             acc_intensity = 0.15  # Minimal movement
-        elif activity_label == 2:  # Cycling
+        elif activity_label == 4:  # Cycling
             hr_bpm = 125 + np.random.randn() * 5  # Elevated HR
             ppg_baseline = 0.0
             acc_intensity = 1.2  # Moderate movement
-        elif activity_label == 3:  # Walking
+        elif activity_label == 7:  # Walking
             hr_bpm = 110 + np.random.randn() * 5  # Moderately elevated
             ppg_baseline = 0.0
             acc_intensity = 0.8  # Walking movement
@@ -573,12 +574,12 @@ def generate_sample_csv() -> str:
         ppg_signal += np.random.randn(len(t_ppg_period)) * 0.05  # Noise
 
         # Generate accelerometer with activity-specific patterns
-        if activity_label == 2:  # Cycling - rhythmic pattern
+        if activity_label == 4:  # Cycling - rhythmic pattern
             freq = 1.5  # ~90 RPM
             accx[acc_start_idx:acc_end_idx] = acc_intensity * np.sin(2 * np.pi * freq * t_acc_period)
             accy[acc_start_idx:acc_end_idx] = acc_intensity * np.sin(2 * np.pi * freq * t_acc_period + np.pi/2)
             accz[acc_start_idx:acc_end_idx] = 9.81 + acc_intensity * 0.5 * np.sin(2 * np.pi * freq * t_acc_period)
-        elif activity_label == 3:  # Walking - step pattern
+        elif activity_label == 7:  # Walking - step pattern
             freq = 1.8  # ~108 steps/min
             accx[acc_start_idx:acc_end_idx] = acc_intensity * np.sin(2 * np.pi * freq * t_acc_period)
             accy[acc_start_idx:acc_end_idx] = acc_intensity * 0.6 * np.sin(2 * np.pi * freq * t_acc_period + np.pi/3)
@@ -613,6 +614,115 @@ def generate_sample_csv() -> str:
     })
 
     return df.to_csv(index=False)
+
+
+def generate_demo_processed_data() -> Dict:
+    """Generate demo processed data directly for Streamlit Cloud.
+
+    Creates 10 minutes of synthetic PPG+ACC data with correct PPG-DaLiA
+    activity labels, preprocesses it into windows, and returns the standard
+    {windows, timestamps, labels, metadata} dict.
+    """
+    duration = 600  # 10 minutes
+    ppg_rate = 64
+    acc_rate = 32
+
+    # Activity schedule with correct PPG-DaLiA labels
+    activities = [
+        (0, 60, 1),      # 0-1 min: Sitting
+        (60, 180, 4),    # 1-3 min: Cycling
+        (180, 240, 1),   # 3-4 min: Sitting
+        (240, 360, 7),   # 4-6 min: Walking
+        (360, 420, 1),   # 6-7 min: Sitting
+        (420, 540, 4),   # 7-9 min: Cycling
+        (540, 600, 1),   # 9-10 min: Sitting
+    ]
+
+    t_ppg = np.arange(0, duration, 1 / ppg_rate)
+    t_acc = np.arange(0, duration, 1 / acc_rate)
+
+    ppg = np.zeros(len(t_ppg))
+    accx = np.zeros(len(t_acc))
+    accy = np.zeros(len(t_acc))
+    accz = np.zeros(len(t_acc))
+    labels = np.zeros(len(t_acc), dtype=int)
+
+    np.random.seed(42)
+
+    for start, end, activity_label in activities:
+        ppg_si = int(start * ppg_rate)
+        ppg_ei = int(end * ppg_rate)
+        acc_si = int(start * acc_rate)
+        acc_ei = int(end * acc_rate)
+
+        t_ppg_p = t_ppg[ppg_si:ppg_ei] - start
+        t_acc_p = t_acc[acc_si:acc_ei] - start
+
+        if activity_label == 1:  # Sitting
+            hr_bpm = 72 + np.random.randn() * 3
+            acc_intensity = 0.15
+        elif activity_label == 4:  # Cycling
+            hr_bpm = 125 + np.random.randn() * 5
+            acc_intensity = 1.2
+        elif activity_label == 7:  # Walking
+            hr_bpm = 110 + np.random.randn() * 5
+            acc_intensity = 0.8
+        else:
+            hr_bpm = 75
+            acc_intensity = 0.2
+
+        hr_freq = hr_bpm / 60.0
+        ppg_signal = np.sin(2 * np.pi * hr_freq * t_ppg_p)
+        ppg_signal += 0.1 * np.sin(2 * np.pi * 2 * hr_freq * t_ppg_p)
+        ppg_signal += np.random.randn(len(t_ppg_p)) * 0.05
+
+        if activity_label == 4:  # Cycling
+            freq = 1.5
+            accx[acc_si:acc_ei] = acc_intensity * np.sin(2 * np.pi * freq * t_acc_p)
+            accy[acc_si:acc_ei] = acc_intensity * np.sin(2 * np.pi * freq * t_acc_p + np.pi / 2)
+            accz[acc_si:acc_ei] = 9.81 + acc_intensity * 0.5 * np.sin(2 * np.pi * freq * t_acc_p)
+        elif activity_label == 7:  # Walking
+            freq = 1.8
+            accx[acc_si:acc_ei] = acc_intensity * np.sin(2 * np.pi * freq * t_acc_p)
+            accy[acc_si:acc_ei] = acc_intensity * 0.6 * np.sin(2 * np.pi * freq * t_acc_p + np.pi / 3)
+            accz[acc_si:acc_ei] = 9.81 + acc_intensity * np.sin(2 * np.pi * 2 * freq * t_acc_p)
+        else:  # Sitting
+            accx[acc_si:acc_ei] = acc_intensity * np.random.randn(len(t_acc_p))
+            accy[acc_si:acc_ei] = acc_intensity * np.random.randn(len(t_acc_p))
+            accz[acc_si:acc_ei] = 9.81 + acc_intensity * np.random.randn(len(t_acc_p))
+
+        accx[acc_si:acc_ei] += np.random.randn(len(t_acc_p)) * 0.05
+        accy[acc_si:acc_ei] += np.random.randn(len(t_acc_p)) * 0.05
+        accz[acc_si:acc_ei] += np.random.randn(len(t_acc_p)) * 0.05
+
+        ppg[ppg_si:ppg_ei] = ppg_signal
+        labels[acc_si:acc_ei] = activity_label
+
+    # Feed directly into preprocessing pipeline (bypasses CSV round-trip)
+    ppg_df = pd.DataFrame({'ppg': ppg, 'timestamp': t_ppg})
+    acc_df = pd.DataFrame({
+        'acc_x': accx, 'acc_y': accy, 'acc_z': accz, 'timestamp': t_acc
+    })
+    labels_df = pd.DataFrame({'activity': labels, 'timestamp': t_acc})
+
+    preprocessor = PPGDaLiaPreprocessor()
+    synced_df = preprocessor.synchronize_signals(ppg_df, acc_df, labels_df)
+    synced_df = preprocessor.compute_derived_features(synced_df)
+    windows, timestamps, window_labels = preprocessor.create_rolling_windows(
+        synced_df, window_seconds=30.0, stride_seconds=5.0
+    )
+
+    return {
+        'windows': windows,
+        'timestamps': timestamps,
+        'labels': window_labels,
+        'metadata': {
+            'n_windows': len(windows),
+            'window_seconds': 30.0,
+            'stride_seconds': 5.0,
+            'sampling_rate': 32,
+        }
+    }
 
 
 def parse_uploaded_csv(uploaded_file) -> Optional[Dict]:
@@ -1152,21 +1262,58 @@ def main():
 
         # Subject selection or file upload
         if data_source == "Pre-processed Data":
-            available_subjects = [
-                int(p.stem.split('_')[1])
-                for p in Path("data/processed").glob("subject_*_processed.pkl")
-            ] if Path("data/processed").exists() else []
+            available_subjects = []
+            if Path("data/processed").exists():
+                for p in Path("data/processed").glob("subject_*_processed.pkl"):
+                    sid = p.stem.split('_')[1]
+                    try:
+                        available_subjects.append(int(sid))
+                    except ValueError:
+                        available_subjects.append(sid)
 
             if not available_subjects:
+                # Auto-generate demo data (for Streamlit Cloud or fresh installs)
+                if 'demo_generation_failed' not in st.session_state:
+                    with st.spinner("Generating demo data (first load)..."):
+                        try:
+                            demo_data = generate_demo_processed_data()
+
+                            processed_dir = Path("data/processed")
+                            processed_dir.mkdir(parents=True, exist_ok=True)
+                            with open(processed_dir / "subject_demo_processed.pkl", 'wb') as f:
+                                pickle.dump(demo_data, f)
+
+                            # Pre-generate mock embeddings
+                            mock_client = MockAPIClient(embedding_dim=128)
+                            embeddings = mock_client.generate_embeddings(demo_data['windows'])
+
+                            embeddings_dir = Path("data/embeddings")
+                            embeddings_dir.mkdir(parents=True, exist_ok=True)
+                            np.save(embeddings_dir / "subject_demo_embeddings.npy", embeddings)
+                            with open(embeddings_dir / "subject_demo_metadata.pkl", 'wb') as f:
+                                pickle.dump({
+                                    'subject_id': 'demo',
+                                    'embeddings_shape': embeddings.shape,
+                                    'timestamps': demo_data['timestamps'],
+                                    'labels': demo_data['labels'],
+                                    'window_metadata': demo_data['metadata'],
+                                }, f)
+
+                            load_subject_data.clear()
+                            load_embeddings.clear()
+                            st.rerun()
+                        except Exception as e:
+                            st.session_state.demo_generation_failed = True
+                            st.error(f"Demo generation failed: {e}")
+
                 st.warning("No processed data found.")
-                st.code("python3 download_dataset.py\npython3 process_all_subjects.py")
-                st.info("Or switch to 'Upload CSV' to upload your own data.")
+                st.info("Switch to 'Upload CSV' to upload your own data.")
                 return
 
             subject_id = st.selectbox(
                 "Select Subject",
                 options=available_subjects,
-                format_func=lambda x: f"Subject {x}"
+                format_func=lambda x: "Demo Data" if x == "demo" else f"Subject {x}"
             )
 
             # Load data
@@ -1313,10 +1460,14 @@ def main():
 
         st.divider()
 
-        # Generate embeddings option
+        # Generate embeddings option — default to mock when no API key
+        api_key_configured = bool(
+            os.getenv("WOOD_WIDE_API_KEY")
+            and os.getenv("WOOD_WIDE_API_KEY") != "your_api_key_here"
+        )
         use_mock = st.checkbox(
             "Use Mock API",
-            value=False,
+            value=not api_key_configured,
             help="Use mock API for embeddings (no API key needed)"
         )
 
@@ -1401,7 +1552,7 @@ def main():
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            st.metric("Subject ID", subject_id)
+            st.metric("Subject ID", "Demo" if subject_id == "demo" else subject_id)
         with col2:
             st.metric("Windows", len(windows))
         with col3:
