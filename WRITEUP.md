@@ -85,7 +85,7 @@ Notable: stairs and walking have near-zero false positive rates. Cycling is high
 
 2. **Ground truth is activity labels, not clinical events:** We define "false positive" as alerting during exercise and "true detection" as alerting during rest. Real clinical anomalies (arrhythmia, tachycardia during sleep) would require labeled medical ground truth.
 
-3. **Summary feature extraction:** The Wood Wide API works best with tabular data, so we extract statistical summaries per window rather than sending raw time series. This loses temporal structure that could be informative.
+3. **Summary feature extraction:** The Wood Wide API works best with tabular data, so we extract statistical summaries per window rather than sending raw time series. This loses temporal structure that could be informative. (The extraction is vectorized using bulk NumPy operations for performance.)
 
 4. **Single centroid model:** One centroid cannot capture the full distribution of "normal." The existing `MultiCentroidDetector` class provides per-activity centroids but requires labeled data at inference time.
 
@@ -102,6 +102,8 @@ Notable: stairs and walking have near-zero false positive rates. Cycling is high
 4. **Real-time streaming:** Implement sliding window processing for live data, with a cached model to avoid retraining.
 
 5. **ROC curve analysis:** Plot the full false-positive vs true-positive tradeoff curve for each method, rather than single operating points.
+
+6. ~~**Embedding caching:** Cache generated embeddings to avoid re-running the upload-train-infer cycle for the same data.~~ *(Done: `APIClient` now supports `cache_dir` for local disk caching and server-side model reuse.)*
 
 ## Dataset Citation
 

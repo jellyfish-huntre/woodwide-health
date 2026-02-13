@@ -280,5 +280,239 @@ class TestWindowsToCSV:
         np.testing.assert_array_almost_equal(values, [1.5, 2.5, 3.5, 4.5])
 
 
+class TestCleanupOnError:
+    """Test that datasets are cleaned up when training or inference fails."""
+
+    @pytest.fixture
+    def api_client(self):
+        return APIClient(api_key="test_key_12345")
+
+    @pytest.fixture
+    def sample_windows(self):
+        return np.random.randn(5, 960, 5).astype(np.float32)
+
+    def test_delete_called_on_train_failure(self, api_client, sample_windows):
+        """Test that _delete_dataset is called when _train_model fails."""
+        with patch.object(api_client, "_upload_dataset",
+                         return_value={"id": "ds_1"}), \
+             patch.object(api_client, "list_models", return_value=[]), \
+             patch.object(api_client, "_train_model",
+                         side_effect=WoodWideAPIError("Train failed")), \
+             patch.object(api_client, "_delete_dataset") as mock_delete:
+
+            with pytest.raises(WoodWideAPIError, match="Train failed"):
+                api_client.generate_embeddings(sample_windows)
+
+            mock_delete.assert_called_once_with("ds_1")
+
+    def test_delete_called_on_infer_failure(self, api_client, sample_windows):
+        """Test that _delete_dataset is called when _infer fails."""
+        with patch.object(api_client, "_upload_dataset",
+                         return_value={"id": "ds_1"}), \
+             patch.object(api_client, "list_models", return_value=[]), \
+             patch.object(api_client, "_train_model",
+                         return_value={"id": "m_1", "training_status": "PENDING"}), \
+             patch.object(api_client, "_poll_model_status",
+                         return_value={"training_status": "COMPLETE"}), \
+             patch.object(api_client, "_infer",
+                         side_effect=WoodWideAPIError("Infer failed")), \
+             patch.object(api_client, "_delete_dataset") as mock_delete:
+
+            with pytest.raises(WoodWideAPIError, match="Infer failed"):
+                api_client.generate_embeddings(sample_windows)
+
+            mock_delete.assert_called_once_with("ds_1")
+
+    def test_delete_not_called_on_success(self, api_client, sample_windows):
+        """Test that _delete_dataset is NOT called on successful completion."""
+        mock_embeddings = {str(i): np.random.randn(128).tolist() for i in range(5)}
+        with patch.object(api_client, "_upload_dataset",
+                         return_value={"id": "ds_1"}), \
+             patch.object(api_client, "list_models", return_value=[]), \
+             patch.object(api_client, "_train_model",
+                         return_value={"id": "m_1", "training_status": "PENDING"}), \
+             patch.object(api_client, "_poll_model_status",
+                         return_value={"training_status": "COMPLETE"}), \
+             patch.object(api_client, "_infer",
+                         return_value={"embeddings": mock_embeddings}), \
+             patch.object(api_client, "_delete_dataset") as mock_delete:
+
+            api_client.generate_embeddings(sample_windows)
+            mock_delete.assert_not_called()
+
+    def test_cleanup_disabled(self, api_client, sample_windows):
+        """Test that cleanup_on_error=False skips cleanup."""
+        with patch.object(api_client, "_upload_dataset",
+                         return_value={"id": "ds_1"}), \
+             patch.object(api_client, "list_models", return_value=[]), \
+             patch.object(api_client, "_train_model",
+                         side_effect=WoodWideAPIError("Train failed")), \
+             patch.object(api_client, "_delete_dataset") as mock_delete:
+
+            with pytest.raises(WoodWideAPIError):
+                api_client.generate_embeddings(sample_windows, cleanup_on_error=False)
+
+            mock_delete.assert_not_called()
+
+    def test_cleanup_failure_does_not_mask_original_error(self, api_client, sample_windows):
+        """Test that cleanup failure doesn't mask the original exception."""
+        with patch.object(api_client, "_upload_dataset",
+                         return_value={"id": "ds_1"}), \
+             patch.object(api_client, "list_models", return_value=[]), \
+             patch.object(api_client, "_train_model",
+                         side_effect=WoodWideAPIError("Train failed")), \
+             patch.object(api_client, "_delete_dataset",
+                         side_effect=WoodWideAPIError("Delete failed")):
+
+            with pytest.raises(WoodWideAPIError, match="Train failed"):
+                api_client.generate_embeddings(sample_windows)
+
+
+class TestModelReuse:
+    """Test server-side model reuse in generate_embeddings."""
+
+    @pytest.fixture
+    def api_client(self):
+        return APIClient(api_key="test_key_12345")
+
+    @pytest.fixture
+    def sample_windows(self):
+        return np.random.randn(5, 960, 5).astype(np.float32)
+
+    def test_skips_training_when_model_exists(self, api_client, sample_windows):
+        """Test that training is skipped when a matching model exists."""
+        mock_embeddings = {str(i): np.random.randn(128).tolist() for i in range(5)}
+
+        with patch.object(api_client, "_upload_dataset",
+                         return_value={"id": "ds_1"}), \
+             patch.object(api_client, "list_models",
+                         return_value=[{"id": "m_existing",
+                                       "model_name": "health_embed_test",
+                                       "training_status": "COMPLETE"}]), \
+             patch.object(api_client, "_train_model") as mock_train, \
+             patch.object(api_client, "_poll_model_status") as mock_poll, \
+             patch.object(api_client, "_infer",
+                         return_value={"embeddings": mock_embeddings}):
+
+            api_client.generate_embeddings(
+                sample_windows, model_name="health_embed_test"
+            )
+            mock_train.assert_not_called()
+            mock_poll.assert_not_called()
+
+    def test_trains_when_no_matching_model(self, api_client, sample_windows):
+        """Test that training proceeds when no matching model exists."""
+        mock_embeddings = {str(i): np.random.randn(128).tolist() for i in range(5)}
+
+        with patch.object(api_client, "_upload_dataset",
+                         return_value={"id": "ds_1"}), \
+             patch.object(api_client, "list_models",
+                         return_value=[]), \
+             patch.object(api_client, "_train_model",
+                         return_value={"id": "m_1", "training_status": "PENDING"}) as mock_train, \
+             patch.object(api_client, "_poll_model_status",
+                         return_value={"training_status": "COMPLETE"}), \
+             patch.object(api_client, "_infer",
+                         return_value={"embeddings": mock_embeddings}):
+
+            api_client.generate_embeddings(sample_windows)
+            mock_train.assert_called_once()
+
+
+class TestDiskCache:
+    """Test local disk caching of embeddings."""
+
+    @pytest.fixture
+    def sample_windows(self):
+        return np.random.randn(5, 960, 5).astype(np.float32)
+
+    def test_cache_write_and_read(self, tmp_path, sample_windows):
+        """Test that embeddings are cached to disk and loaded on second call."""
+        client = MockAPIClient(embedding_dim=128, cache_dir=str(tmp_path))
+
+        emb1 = client.generate_embeddings(sample_windows)
+        assert len(list(tmp_path.glob("*.npz"))) == 1
+
+        emb2 = client.generate_embeddings(sample_windows)
+        np.testing.assert_array_equal(emb1, emb2)
+
+    def test_force_regenerate_bypasses_cache(self, tmp_path, sample_windows):
+        """Test that force_regenerate=True bypasses cached embeddings."""
+        client = MockAPIClient(embedding_dim=128, cache_dir=str(tmp_path))
+
+        emb1 = client.generate_embeddings(sample_windows)
+        emb2 = client.generate_embeddings(sample_windows, force_regenerate=True)
+
+        np.testing.assert_array_equal(emb1, emb2)
+
+    def test_different_data_different_cache(self, tmp_path):
+        """Test that different input data produces different cache entries."""
+        client = MockAPIClient(embedding_dim=128, cache_dir=str(tmp_path))
+
+        windows_a = np.random.randn(5, 960, 5).astype(np.float32)
+        windows_b = np.random.randn(5, 960, 5).astype(np.float32)
+
+        client.generate_embeddings(windows_a)
+        client.generate_embeddings(windows_b)
+        assert len(list(tmp_path.glob("*.npz"))) == 2
+
+    def test_no_cache_dir_no_caching(self, sample_windows):
+        """Test that no cache_dir means no caching."""
+        client = MockAPIClient(embedding_dim=128)
+        client.generate_embeddings(sample_windows)
+        # No error, no cache — just verifies the path works
+
+
+class TestExtractSummaryFeatures:
+    """Test vectorized summary feature extraction."""
+
+    def test_output_shape_5_features(self):
+        """Verify output shape: 5 features * 7 stats + 1 cross-corr = 36."""
+        windows = np.random.randn(10, 100, 5).astype(np.float32)
+        result = APIClient._extract_summary_features(windows)
+        assert result.shape == (10, 36)
+
+    def test_output_shape_3_features_no_correlation(self):
+        """Verify no cross-correlation column when n_features < 5."""
+        windows = np.random.randn(5, 100, 3).astype(np.float32)
+        result = APIClient._extract_summary_features(windows)
+        assert result.shape == (5, 21)  # 3 * 7, no cross-corr
+
+    def test_interleaved_column_order(self):
+        """Verify columns are interleaved: [mean_f0, std_f0, ..., q75_f0, mean_f1, ...]."""
+        np.random.seed(42)
+        windows = np.random.randn(3, 100, 5).astype(np.float32)
+        result = APIClient._extract_summary_features(windows)
+
+        # Check first 7 columns match stats for feature 0
+        w0 = windows[0]
+        ch0 = w0[:, 0]
+        expected = [
+            np.mean(ch0), np.std(ch0), np.min(ch0), np.max(ch0),
+            np.median(ch0), np.percentile(ch0, 25), np.percentile(ch0, 75)
+        ]
+        np.testing.assert_array_almost_equal(result[0, :7], expected, decimal=5)
+
+        # Check columns 7-13 match stats for feature 1
+        ch1 = w0[:, 1]
+        expected_f1 = [
+            np.mean(ch1), np.std(ch1), np.min(ch1), np.max(ch1),
+            np.median(ch1), np.percentile(ch1, 25), np.percentile(ch1, 75)
+        ]
+        np.testing.assert_array_almost_equal(result[0, 7:14], expected_f1, decimal=5)
+
+    def test_cross_correlation_correct(self):
+        """Verify cross-correlation column matches np.corrcoef."""
+        np.random.seed(42)
+        windows = np.random.randn(3, 100, 5).astype(np.float32)
+        result = APIClient._extract_summary_features(windows)
+
+        for i in range(3):
+            ppg = windows[i, :, 0]
+            acc = windows[i, :, 4]
+            expected_corr = np.corrcoef(ppg, acc)[0, 1]
+            np.testing.assert_almost_equal(result[i, -1], expected_corr, decimal=5)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

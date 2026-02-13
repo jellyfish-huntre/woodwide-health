@@ -52,6 +52,13 @@ Located in `src/embeddings/api_client.py`, this class handles all API interactio
 - **Normalization:** Embeddings are unit-normalized (L2 norm = 1)
 - **Rate Limiting:** Client respects `Retry-After` headers automatically
 
+### Cleanup and Caching
+
+- **Cleanup on error:** `generate_embeddings()` automatically deletes uploaded datasets if training or inference fails. Disable with `cleanup_on_error=False`.
+- **Server-side model reuse:** Before training, the client checks `list_models()` for an existing model with the same name and COMPLETE status. If found, training is skipped.
+- **Local disk cache:** Set `cache_dir` on `APIClient` or `MockAPIClient` to cache embeddings to disk. Subsequent calls with the same input data return cached results instantly. Use `force_regenerate=True` to bypass.
+- **Summary feature optimization:** `_extract_summary_features()` uses vectorized NumPy operations for performance while maintaining identical output column order.
+
 See `docs/API_CLIENT_GUIDE.md` for detailed usage examples.
 
 ## Development Commands

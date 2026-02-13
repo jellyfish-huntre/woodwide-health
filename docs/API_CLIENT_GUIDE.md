@@ -145,7 +145,40 @@ client = APIClient(
 )
 ```
 
-### 5. Request Logging
+### 5. Local Disk Caching
+
+Cache embeddings to avoid re-running the API workflow on repeated calls:
+
+```python
+client = APIClient(cache_dir="data/embedding_cache")
+
+embeddings = client.generate_embeddings(windows)   # Calls API, caches result
+embeddings = client.generate_embeddings(windows)   # Loaded from disk cache
+
+# Force a fresh API call, bypassing cache
+embeddings = client.generate_embeddings(windows, force_regenerate=True)
+```
+
+Cache files are stored as compressed `.npz` files keyed by a SHA-256 hash of the input data.
+
+### 6. Cleanup on Error
+
+Uploaded datasets are automatically deleted if training or inference fails, preventing resource leaks on the API server:
+
+```python
+client = APIClient()
+# If training fails, the uploaded dataset is cleaned up automatically
+embeddings = client.generate_embeddings(windows)
+
+# Disable cleanup if you want to keep the dataset for debugging
+embeddings = client.generate_embeddings(windows, cleanup_on_error=False)
+```
+
+### 7. Server-Side Model Reuse
+
+Before training a new model, the client checks `list_models()` for an existing model with the same name and COMPLETE status. If found, training is skipped entirely and the existing model is used for inference. Model names are deterministic (based on a hash of the input data), so repeated calls with the same data automatically reuse the trained model.
+
+### 8. Request Logging
 
 All requests are logged for debugging:
 
@@ -190,6 +223,8 @@ Generate embeddings for multiple windows via the upload-train-infer workflow.
 - `model_name` (str, optional): Name for trained model (auto-generated if None)
 - `batch_size` (int): Kept for backward compatibility (ignored)
 - `embedding_dim` (int): Kept for backward compatibility (ignored)
+- `cleanup_on_error` (bool): Delete uploaded dataset on failure (default: True)
+- `force_regenerate` (bool): Bypass local disk cache (default: False)
 
 **Returns:**
 - `ndarray`: Shape `(n_windows, embedding_dim)`

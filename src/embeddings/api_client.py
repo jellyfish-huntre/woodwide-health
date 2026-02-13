@@ -15,6 +15,7 @@ import os
 import ssl
 import time
 import requests
+from pathlib import Path
 from requests.adapters import HTTPAdapter
 import numpy as np
 from typing import Callable, Dict, Optional
@@ -97,7 +98,8 @@ class APIClient:
         retry_delay: float = 1.0,
         ssl_ciphers: Optional[str] = None,
         training_timeout: int = 600,
-        poll_interval: float = 5.0
+        poll_interval: float = 5.0,
+        cache_dir: Optional[str] = None
     ):
         """
         Initialize Wood Wide API client.
@@ -111,6 +113,7 @@ class APIClient:
             ssl_ciphers: SSL cipher string override. If None, reads from WOOD_WIDE_SSL_CIPHERS env var.
             training_timeout: Max seconds to wait for model training (default: 600)
             poll_interval: Seconds between training status polls (default: 5.0)
+            cache_dir: Directory for local embedding cache. If None, caching is disabled.
 
         Raises:
             AuthenticationError: If API key is not provided or found in environment
@@ -134,6 +137,10 @@ class APIClient:
         self.ssl_ciphers = ssl_ciphers or os.getenv("WOOD_WIDE_SSL_CIPHERS")
         self.training_timeout = training_timeout
         self.poll_interval = poll_interval
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Embedding cache directory: {self.cache_dir}")
 
         # Session for connection pooling (no Content-Type — set per-request)
         self.session = requests.Session()
@@ -298,30 +305,39 @@ class APIClient:
             Feature matrix of shape (n_windows, n_summary_features)
         """
         n_windows, window_length, n_features = windows.shape
-        rows = []
-        for w in windows:
-            row = []
-            for i in range(n_features):
-                ch = w[:, i]
-                row.extend([
-                    np.mean(ch),
-                    np.std(ch),
-                    np.min(ch),
-                    np.max(ch),
-                    np.median(ch),
-                    np.percentile(ch, 25),
-                    np.percentile(ch, 75),
-                ])
-            # Cross-feature: PPG–accelerometer-magnitude correlation
-            if n_features >= 5:
-                ppg, acc_mag = w[:, 0], w[:, 4]
-                if np.std(ppg) > 0 and np.std(acc_mag) > 0:
-                    row.append(np.corrcoef(ppg, acc_mag)[0, 1])
-                else:
-                    row.append(0.0)
-            rows.append(row)
 
-        features = np.array(rows, dtype=np.float32)
+        # Compute all 7 statistics along the time axis (axis=1)
+        # Each result has shape (n_windows, n_features)
+        means = np.mean(windows, axis=1)
+        stds = np.std(windows, axis=1)
+        mins = np.min(windows, axis=1)
+        maxs = np.max(windows, axis=1)
+        medians = np.median(windows, axis=1)
+        q25 = np.percentile(windows, 25, axis=1)
+        q75 = np.percentile(windows, 75, axis=1)
+
+        # Stack into (n_windows, 7, n_features), transpose to
+        # (n_windows, n_features, 7), reshape to (n_windows, n_features * 7).
+        # This produces interleaved order matching the original for-loop:
+        # [mean_f0, std_f0, min_f0, max_f0, med_f0, q25_f0, q75_f0, mean_f1, ...]
+        stats = np.stack([means, stds, mins, maxs, medians, q25, q75], axis=1)
+        stats = np.transpose(stats, (0, 2, 1))
+        features = stats.reshape(n_windows, -1)
+
+        # Cross-feature: PPG–accelerometer-magnitude correlation
+        if n_features >= 5:
+            ppg = windows[:, :, 0]
+            acc_mag = windows[:, :, 4]
+            ppg_centered = ppg - ppg.mean(axis=1, keepdims=True)
+            acc_centered = acc_mag - acc_mag.mean(axis=1, keepdims=True)
+            numerator = (ppg_centered * acc_centered).sum(axis=1)
+            denom = np.sqrt(
+                (ppg_centered ** 2).sum(axis=1) * (acc_centered ** 2).sum(axis=1)
+            )
+            corr = np.where(denom > 0, numerator / denom, 0.0)
+            features = np.column_stack([features, corr])
+
+        features = features.astype(np.float32)
         return np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
 
     @staticmethod
@@ -459,13 +475,19 @@ class APIClient:
         embedding_dim: Optional[int] = None,
         dataset_name: Optional[str] = None,
         model_name: Optional[str] = None,
-        progress_callback: Optional[Callable] = None
+        progress_callback: Optional[Callable] = None,
+        cleanup_on_error: bool = True,
+        force_regenerate: bool = False
     ) -> np.ndarray:
         """
         Generate embeddings for time-series windows.
 
         Orchestrates the full workflow: convert to CSV → upload dataset →
         train embedding model → poll until complete → run inference.
+
+        Includes automatic cleanup of uploaded datasets on failure, server-side
+        model reuse (skips training if a matching model already exists), and
+        optional local disk caching via ``cache_dir``.
 
         Args:
             windows: Array of shape (n_windows, window_length, n_features)
@@ -474,8 +496,12 @@ class APIClient:
             dataset_name: Name for the uploaded dataset (auto-generated if None)
             model_name: Name for the trained model (auto-generated if None)
             progress_callback: Optional callback(step, message) for progress updates.
-                Steps: csv, upload, upload_done, train, train_done, poll,
-                poll_status, poll_done, infer, done.
+                Steps: csv, upload, upload_done, reuse, train, train_done, poll,
+                poll_status, poll_done, infer, cache_hit, done.
+            cleanup_on_error: If True, delete the uploaded dataset when
+                training or inference fails (default: True).
+            force_regenerate: If True, bypass the local disk cache and
+                regenerate embeddings from the API (default: False).
 
         Returns:
             Array of shape (n_windows, embedding_dim) containing embeddings
@@ -491,10 +517,21 @@ class APIClient:
 
         _notify("start", f"Generating embeddings for {n_windows} windows")
 
-        # Generate deterministic names from data content
+        # Generate deterministic names and cache key from data content
         data_hash = hashlib.md5(windows.tobytes()[:1024]).hexdigest()[:8]
+        cache_key = hashlib.sha256(windows.tobytes()).hexdigest()[:16]
         dataset_name = dataset_name or f"health_windows_{data_hash}"
         model_name = model_name or f"health_embed_{data_hash}"
+
+        # Check local disk cache
+        if self.cache_dir and not force_regenerate:
+            cache_file = self.cache_dir / f"embeddings_{cache_key}.npz"
+            if cache_file.exists():
+                _notify("cache_hit", f"Loading cached embeddings from {cache_file}")
+                cached = np.load(cache_file)
+                embeddings = cached["embeddings"]
+                _notify("done", f"Loaded cached embeddings shape: {embeddings.shape}")
+                return embeddings
 
         # Step 1: Extract features & convert to CSV
         flat_cols = windows.shape[1] * windows.shape[2] if windows.ndim == 3 else windows.shape[1]
@@ -512,31 +549,65 @@ class APIClient:
         dataset_id = dataset_info["id"]
         _notify("upload_done", f"Dataset uploaded: id={dataset_id}")
 
-        # Step 3: Train model
-        _notify("train", f"Starting model training '{model_name}'...")
-        train_response = self._train_model(dataset_name, model_name)
-        model_id = train_response["id"]
-        _notify("train_done", f"Training started: model_id={model_id}")
+        try:
+            # Step 2.5: Check for existing model (server-side reuse)
+            model_id = None
+            try:
+                existing_models = self.list_models()
+                for model in existing_models:
+                    if (model.get("model_name") == model_name and
+                            model.get("training_status") == "COMPLETE"):
+                        model_id = model["id"]
+                        _notify("reuse", f"Found existing model '{model_name}' (id={model_id}), skipping training")
+                        break
+            except Exception as e:
+                logger.debug(f"Could not check for existing models: {e}")
 
-        # Step 4: Poll until complete
-        _notify("poll", "Waiting for training to complete...")
-        self._poll_model_status(model_id, progress_callback=progress_callback)
+            if model_id is None:
+                # Step 3: Train model (no existing model found)
+                _notify("train", f"Starting model training '{model_name}'...")
+                train_response = self._train_model(dataset_name, model_name)
+                model_id = train_response["id"]
+                _notify("train_done", f"Training started: model_id={model_id}")
 
-        # Step 5: Run inference
-        _notify("infer", "Running inference...")
-        infer_response = self._infer(model_id, dataset_id)
+                # Step 4: Poll until complete
+                _notify("poll", "Waiting for training to complete...")
+                self._poll_model_status(model_id, progress_callback=progress_callback)
 
-        # Step 6: Parse response into numpy array
-        # Response format: {"embeddings": {"0": [vec], "1": [vec], ...}}
-        embeddings_dict = infer_response.get("embeddings", infer_response)
-        embeddings_list = []
-        for i in range(n_windows):
-            vec = embeddings_dict[str(i)]
-            embeddings_list.append(vec)
+            # Step 5: Run inference
+            _notify("infer", "Running inference...")
+            infer_response = self._infer(model_id, dataset_id)
 
-        embeddings = np.array(embeddings_list, dtype=np.float32)
-        _notify("done", f"Generated embeddings shape: {embeddings.shape}")
-        return embeddings
+            # Step 6: Parse response into numpy array
+            # Response format: {"embeddings": {"0": [vec], "1": [vec], ...}}
+            embeddings_dict = infer_response.get("embeddings", infer_response)
+            embeddings_list = []
+            for i in range(n_windows):
+                vec = embeddings_dict.get(str(i))
+                if vec is None:
+                    raise WoodWideAPIError(f"Missing embedding for window {i} in inference response")
+                embeddings_list.append(vec)
+
+            embeddings = np.array(embeddings_list, dtype=np.float32)
+
+            # Save to local disk cache
+            if self.cache_dir:
+                cache_file = self.cache_dir / f"embeddings_{cache_key}.npz"
+                np.savez_compressed(cache_file, embeddings=embeddings)
+                logger.info(f"Cached embeddings to {cache_file}")
+
+            _notify("done", f"Generated embeddings shape: {embeddings.shape}")
+            return embeddings
+
+        except Exception:
+            if cleanup_on_error:
+                try:
+                    logger.info(f"Cleaning up dataset {dataset_id} after failure...")
+                    self._delete_dataset(dataset_id)
+                    logger.info(f"Dataset {dataset_id} deleted successfully")
+                except Exception as cleanup_err:
+                    logger.warning(f"Failed to clean up dataset {dataset_id}: {cleanup_err}")
+            raise
 
     def generate_single_embedding(
         self,
@@ -622,12 +693,13 @@ class MockAPIClient(APIClient):
     embeddings. Useful for development and testing.
     """
 
-    def __init__(self, embedding_dim: int = 128, **kwargs):
+    def __init__(self, embedding_dim: int = 128, cache_dir: Optional[str] = None, **kwargs):
         """
         Initialize mock client.
 
         Args:
             embedding_dim: Dimension of generated embeddings
+            cache_dir: Directory for local embedding cache. If None, caching is disabled.
             **kwargs: Ignored (for compatibility with APIClient)
         """
         # Don't call super().__init__() to avoid API key requirement
@@ -639,6 +711,9 @@ class MockAPIClient(APIClient):
         self._mock_models = {}
         self._dataset_counter = 0
         self._model_counter = 0
+        self.cache_dir = Path(cache_dir) if cache_dir else None
+        if self.cache_dir:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Initialized Mock API client (embedding_dim={embedding_dim})")
 
     def _make_request(self, method: str, endpoint: str, data=None,
@@ -688,7 +763,11 @@ class MockAPIClient(APIClient):
         if endpoint == "/api/models/embedding/train" and method == "POST":
             self._model_counter += 1
             model_id = f"model_mock_{self._model_counter}"
-            self._mock_models[model_id] = {"training_status": "COMPLETE"}
+            model_name_val = data.get("model_name", "unnamed") if data else "unnamed"
+            self._mock_models[model_id] = {
+                "training_status": "COMPLETE",
+                "model_name": model_name_val
+            }
             return {"id": model_id, "training_status": "PENDING"}
 
         # GET /api/models/{model_id}
