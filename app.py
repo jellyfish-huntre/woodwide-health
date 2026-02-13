@@ -497,7 +497,7 @@ def load_isolation_forest_results(subject_id: Union[int, str]) -> Optional[Dict]
 
 def _decompress_bundled_data() -> bool:
     """Decompress LZMA-compressed data from bundled_data/ to data/processed/."""
-    bundled = Path("bundled_data")
+    bundled = Path(__file__).parent / "bundled_data"
     if not bundled.exists():
         return False
     compressed_files = sorted(bundled.glob("*.pkl.lzma"))
@@ -505,10 +505,11 @@ def _decompress_bundled_data() -> bool:
         return False
     processed_dir = Path("data/processed")
     processed_dir.mkdir(parents=True, exist_ok=True)
-    for cf in compressed_files:
-        out = processed_dir / cf.stem  # strips .lzma → .pkl
-        if not out.exists():
-            out.write_bytes(lzma.decompress(cf.read_bytes()))
+    # Decompress only the first subject to stay within Streamlit Cloud disk limits
+    cf = compressed_files[0]
+    out = processed_dir / cf.stem  # strips .lzma → .pkl
+    if not out.exists():
+        out.write_bytes(lzma.decompress(cf.read_bytes()))
     return True
 
 
@@ -1332,6 +1333,8 @@ def main():
                         except Exception as e:
                             st.session_state.data_init_failed = True
                             st.error(f"Data initialization failed: {e}")
+                            import traceback
+                            st.code(traceback.format_exc())
 
                 st.warning("No processed data found.")
                 st.info("Switch to 'Upload CSV' to upload your own data.")
