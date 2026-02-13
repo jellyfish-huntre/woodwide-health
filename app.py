@@ -12,6 +12,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import pickle
+import lzma
 from pathlib import Path
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -22,6 +23,14 @@ import os
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Bridge Streamlit Cloud secrets → os.environ so existing getenv() calls work
+try:
+    for key, value in st.secrets.items():
+        if isinstance(value, str) and key not in os.environ:
+            os.environ[key] = value
+except FileNotFoundError:
+    pass  # No secrets.toml — running locally with .env
 
 from src.detectors.woodwide import WoodWideDetector, DetectionResult
 from src.detectors.isolation_forest_detector import IsolationForestDetector
@@ -484,6 +493,23 @@ def load_isolation_forest_results(subject_id: Union[int, str]) -> Optional[Dict]
     with open(results_file, 'rb') as f:
         results = pickle.load(f)
     return results
+
+
+def _decompress_bundled_data() -> bool:
+    """Decompress LZMA-compressed data from bundled_data/ to data/processed/."""
+    bundled = Path("bundled_data")
+    if not bundled.exists():
+        return False
+    compressed_files = sorted(bundled.glob("*.pkl.lzma"))
+    if not compressed_files:
+        return False
+    processed_dir = Path("data/processed")
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    for cf in compressed_files:
+        out = processed_dir / cf.stem  # strips .lzma → .pkl
+        if not out.exists():
+            out.write_bytes(lzma.decompress(cf.read_bytes()))
+    return True
 
 
 def _clear_uploaded_data():
@@ -1272,39 +1298,40 @@ def main():
                         available_subjects.append(sid)
 
             if not available_subjects:
-                # Auto-generate demo data (for Streamlit Cloud or fresh installs)
-                if 'demo_generation_failed' not in st.session_state:
-                    with st.spinner("Generating demo data (first load)..."):
+                # Try decompressing bundled real data first, then fall back to demo
+                if 'data_init_failed' not in st.session_state:
+                    with st.spinner("Loading data (first run)..."):
                         try:
-                            demo_data = generate_demo_processed_data()
-
-                            processed_dir = Path("data/processed")
-                            processed_dir.mkdir(parents=True, exist_ok=True)
-                            with open(processed_dir / "subject_demo_processed.pkl", 'wb') as f:
-                                pickle.dump(demo_data, f)
-
-                            # Pre-generate mock embeddings
-                            mock_client = MockAPIClient(embedding_dim=128)
-                            embeddings = mock_client.generate_embeddings(demo_data['windows'])
-
-                            embeddings_dir = Path("data/embeddings")
-                            embeddings_dir.mkdir(parents=True, exist_ok=True)
-                            np.save(embeddings_dir / "subject_demo_embeddings.npy", embeddings)
-                            with open(embeddings_dir / "subject_demo_metadata.pkl", 'wb') as f:
-                                pickle.dump({
-                                    'subject_id': 'demo',
-                                    'embeddings_shape': embeddings.shape,
-                                    'timestamps': demo_data['timestamps'],
-                                    'labels': demo_data['labels'],
-                                    'window_metadata': demo_data['metadata'],
-                                }, f)
-
-                            load_subject_data.clear()
-                            load_embeddings.clear()
-                            st.rerun()
+                            if _decompress_bundled_data():
+                                load_subject_data.clear()
+                                load_embeddings.clear()
+                                st.rerun()
+                            else:
+                                # No bundled data — generate synthetic demo
+                                demo_data = generate_demo_processed_data()
+                                processed_dir = Path("data/processed")
+                                processed_dir.mkdir(parents=True, exist_ok=True)
+                                with open(processed_dir / "subject_demo_processed.pkl", 'wb') as f:
+                                    pickle.dump(demo_data, f)
+                                mock_client = MockAPIClient(embedding_dim=128)
+                                embeddings = mock_client.generate_embeddings(demo_data['windows'])
+                                embeddings_dir = Path("data/embeddings")
+                                embeddings_dir.mkdir(parents=True, exist_ok=True)
+                                np.save(embeddings_dir / "subject_demo_embeddings.npy", embeddings)
+                                with open(embeddings_dir / "subject_demo_metadata.pkl", 'wb') as f:
+                                    pickle.dump({
+                                        'subject_id': 'demo',
+                                        'embeddings_shape': embeddings.shape,
+                                        'timestamps': demo_data['timestamps'],
+                                        'labels': demo_data['labels'],
+                                        'window_metadata': demo_data['metadata'],
+                                    }, f)
+                                load_subject_data.clear()
+                                load_embeddings.clear()
+                                st.rerun()
                         except Exception as e:
-                            st.session_state.demo_generation_failed = True
-                            st.error(f"Demo generation failed: {e}")
+                            st.session_state.data_init_failed = True
+                            st.error(f"Data initialization failed: {e}")
 
                 st.warning("No processed data found.")
                 st.info("Switch to 'Upload CSV' to upload your own data.")
@@ -1477,7 +1504,7 @@ def main():
             if api_key and api_key != "your_api_key_here":
                 st.success(f"[SUCCESS] API Key loaded (ends with ...{api_key[-4:]})")
             else:
-                st.error("[ERROR] API Key not found. Set WOOD_WIDE_API_KEY in .env file")
+                st.error("[ERROR] API Key not found. Set WOOD_WIDE_API_KEY in .env or Streamlit secrets")
                 st.info("Enable 'Use Mock API' above to test without an API key")
 
         force_regenerate = st.checkbox(
