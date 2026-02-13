@@ -192,18 +192,18 @@ Wood Wide doesn't just set a better threshold or engineer better features—it s
 # Further reading and references
 FURTHER_READING = {
     "documentation": """**Documentation:**
+- Detailed writeup: `WRITEUP.md`
 - API Client Guide: `docs/API_CLIENT_GUIDE.md`
-- Detector Implementation: `src/detectors/woodwide.py`
-- Preprocessing Pipeline: `src/ingestion/preprocess.py`""",
+- Source: `src/detectors/woodwide.py`, `src/embeddings/api_client.py`""",
 
-    "examples": """**Code Examples:**
-- Complete Examples: `examples/embedding_workflow.py`
-- Baseline Detection: `baseline_threshold_detection.py`
-- Wood Wide Detection: `woodwide_detection.py`""",
+    "examples": """**Running the Pipeline:**
+- Generate embeddings: `python3 generate_embeddings.py 1`
+- Baseline detection: `python3 baseline_threshold_detection.py 1 --threshold 100`
+- Wood Wide detection: `python3 woodwide_detection.py 1 --compare-baseline 100`""",
 
-    "research": """**Research & Background:**
-- Isolation Forest Comparison: `docs/ISOLATION_FOREST_BASELINE.md`
-- Three-Way Comparison: `THREE_WAY_COMPARISON_SUMMARY.md`"""
+    "research": """**Background:**
+- PPG-DaLiA Dataset: https://doi.org/10.24432/C5N312
+- Wood Wide API Docs: https://docs.woodwide.ai"""
 }
 
 # Callout messages for different scenarios

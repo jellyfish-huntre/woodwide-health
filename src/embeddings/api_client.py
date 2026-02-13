@@ -278,6 +278,52 @@ class APIClient:
 
     # ---- Dataset & model workflow helpers ----
 
+    # Maximum number of CSV columns the API can train on reliably.
+    # Beyond this, internal KMeans/PCA steps may produce NaN.
+    MAX_FLAT_COLS = 500
+
+    @staticmethod
+    def _extract_summary_features(windows: np.ndarray) -> np.ndarray:
+        """Extract per-window summary statistics for API upload.
+
+        When raw windows are too wide (e.g. 960 samples x 5 features = 4800
+        columns), the API's internal training fails.  This converts each
+        window into a compact feature vector of summary statistics that
+        preserves the key signal characteristics.
+
+        Args:
+            windows: Shape (n_windows, window_length, n_features)
+
+        Returns:
+            Feature matrix of shape (n_windows, n_summary_features)
+        """
+        n_windows, window_length, n_features = windows.shape
+        rows = []
+        for w in windows:
+            row = []
+            for i in range(n_features):
+                ch = w[:, i]
+                row.extend([
+                    np.mean(ch),
+                    np.std(ch),
+                    np.min(ch),
+                    np.max(ch),
+                    np.median(ch),
+                    np.percentile(ch, 25),
+                    np.percentile(ch, 75),
+                ])
+            # Cross-feature: PPG–accelerometer-magnitude correlation
+            if n_features >= 5:
+                ppg, acc_mag = w[:, 0], w[:, 4]
+                if np.std(ppg) > 0 and np.std(acc_mag) > 0:
+                    row.append(np.corrcoef(ppg, acc_mag)[0, 1])
+                else:
+                    row.append(0.0)
+            rows.append(row)
+
+        features = np.array(rows, dtype=np.float32)
+        return np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
     @staticmethod
     def _windows_to_csv_bytes(windows: np.ndarray) -> bytes:
         """Convert windows array to CSV bytes for upload.
@@ -286,7 +332,7 @@ class APIClient:
         This way each row in the dataset produces one embedding vector.
 
         Args:
-            windows: Shape (n_windows, window_length, n_features)
+            windows: Shape (n_windows, window_length, n_features) or (n_windows, n_features)
 
         Returns:
             CSV file content as bytes
@@ -450,9 +496,15 @@ class APIClient:
         dataset_name = dataset_name or f"health_windows_{data_hash}"
         model_name = model_name or f"health_embed_{data_hash}"
 
-        # Step 1: Convert windows to CSV
-        _notify("csv", f"Converting {n_windows} windows to CSV format...")
-        csv_bytes = self._windows_to_csv_bytes(windows)
+        # Step 1: Extract features & convert to CSV
+        flat_cols = windows.shape[1] * windows.shape[2] if windows.ndim == 3 else windows.shape[1]
+        if flat_cols > self.MAX_FLAT_COLS:
+            _notify("csv", f"Extracting summary features from {n_windows} windows ({flat_cols} cols → compact)...")
+            summary = self._extract_summary_features(windows)
+            csv_bytes = self._windows_to_csv_bytes(summary)
+        else:
+            _notify("csv", f"Converting {n_windows} windows to CSV format...")
+            csv_bytes = self._windows_to_csv_bytes(windows)
 
         # Step 2: Upload dataset
         _notify("upload", f"Uploading dataset '{dataset_name}'...")

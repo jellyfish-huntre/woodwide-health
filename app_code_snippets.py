@@ -230,7 +230,7 @@ detector = WoodWideDetector(
 detector.fit(
     embeddings=embeddings,
     labels=activity_labels,
-    exercise_labels=[2, 3, 4, 5]  # Cycling, Walking, Stairs
+    exercise_labels=[2, 3, 4, 7]  # Cycling, Walking, Stairs
 )
 
 # Detector learns:
@@ -288,7 +288,7 @@ detector = WoodWideDetector(threshold_percentile=95)
 result = detector.fit_predict(embeddings, labels)
 
 # Compare metrics
-is_exercise = np.isin(labels, [2, 3, 4, 5])
+is_exercise = np.isin(labels, [2, 3, 4, 7])
 baseline_fp_rate = (baseline_alerts & is_exercise).sum() / is_exercise.sum() * 100
 woodwide_fp_rate = result.metrics['false_positive_rate_pct']
 

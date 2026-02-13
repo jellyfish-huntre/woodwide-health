@@ -328,7 +328,7 @@ def main():
     }
 
     # Exercise vs. rest classification
-    exercise_labels = [2, 3, 4, 5]  # Cycling, Walking, Stairs
+    exercise_labels = [2, 3, 4, 7]  # Cycling, Walking, Stairs
 
     print(f"✓ Loaded {len(windows)} windows")
     print(f"  Window shape: {windows.shape}")

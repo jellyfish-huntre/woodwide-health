@@ -1159,7 +1159,7 @@ def main():
 
             if not available_subjects:
                 st.warning("No processed data found.")
-                st.code("python create_realistic_synthetic_data.py\npython -m src.ingestion.preprocess")
+                st.code("python3 download_dataset.py\npython3 process_all_subjects.py")
                 st.info("Or switch to 'Upload CSV' to upload your own data.")
                 return
 
@@ -1367,13 +1367,15 @@ def main():
     labels = data['labels']
 
     activity_map = {
+        0: 'Transient',
         1: 'Sitting',
-        2: 'Cycling',
-        3: 'Walking',
-        4: 'Ascending stairs',
-        5: 'Descending stairs',
-        6: 'Vacuum cleaning',
-        7: 'Ironing'
+        2: 'Ascending stairs',
+        3: 'Table soccer',
+        4: 'Cycling',
+        5: 'Driving',
+        6: 'Lunch break',
+        7: 'Walking',
+        8: 'Working'
     }
 
     # Tabs
@@ -1507,7 +1509,7 @@ def main():
         baseline_alerts = hr_bpm > baseline_threshold
 
         # Compute metrics
-        is_exercise = np.isin(labels, [2, 3, 4, 5])
+        is_exercise = np.isin(labels, [2, 3, 4, 7])
         is_rest = ~is_exercise
 
         baseline_metrics = {
@@ -1637,7 +1639,7 @@ def main():
                 n_alerts = (baseline_alerts & mask).sum()
                 activity_perf.append({
                     'Activity': activity,
-                    'Type': 'Exercise' if label in [2, 3, 4, 5] else 'Rest',
+                    'Type': 'Exercise' if label in [2, 3, 4, 7] else 'Rest',
                     'Windows': mask.sum(),
                     'Alerts': n_alerts,
                     'Alert Rate (%)': n_alerts / mask.sum() * 100
@@ -1801,7 +1803,7 @@ def main():
                 n_alerts = (iforest_result.alerts & mask).sum()
                 if_activity_perf.append({
                     'Activity': activity,
-                    'Type': 'Exercise' if label in [2, 3, 4, 5] else 'Rest',
+                    'Type': 'Exercise' if label in [2, 3, 4, 7] else 'Rest',
                     'Windows': int(mask.sum()),
                     'Alerts': int(n_alerts),
                     'Alert Rate (%)': n_alerts / mask.sum() * 100
@@ -2128,7 +2130,7 @@ def main():
                 mean_dist = result.distances[mask].mean()
                 activity_perf.append({
                     'Activity': activity,
-                    'Type': 'Exercise' if label in [2, 3, 4, 5] else 'Rest',
+                    'Type': 'Exercise' if label in [2, 3, 4, 7] else 'Rest',
                     'Windows': mask.sum(),
                     'Alerts': n_alerts,
                     'Alert Rate (%)': n_alerts / mask.sum() * 100,
@@ -2165,7 +2167,7 @@ def main():
         # Evaluation Methodology
         st.subheader("Evaluation Methodology")
         duration = (timestamps[-1] - timestamps[0]) / 60
-        is_exercise = np.isin(labels, [2, 3, 4, 5])
+        is_exercise = np.isin(labels, [2, 3, 4, 7])
 
         st.markdown(f"""
         **Detection Methods:**
@@ -2217,7 +2219,7 @@ def main():
             iforest_metrics['alerts'] = iforest_result.alerts
 
         # Compute baseline metrics
-        is_exercise = np.isin(labels, [2, 3, 4, 5])
+        is_exercise = np.isin(labels, [2, 3, 4, 7])
         baseline_metrics = {
             'total_alerts': int(baseline_alerts.sum()),
             'alerts_during_exercise': int((baseline_alerts & is_exercise).sum()),

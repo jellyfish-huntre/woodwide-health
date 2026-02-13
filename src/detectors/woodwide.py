@@ -85,7 +85,7 @@ class WoodWideDetector:
             embeddings: Training embeddings, shape (n_samples, embedding_dim)
             labels: Activity labels, shape (n_samples,)
             exercise_labels: List of label values representing exercise
-                           Default: [2, 3, 4, 5] (Cycling, Walking, Stairs)
+                           Default: [2, 3, 4, 7] (Stairs, Table Soccer, Cycling, Walking)
 
         Returns:
             Self (fitted detector)
@@ -94,7 +94,8 @@ class WoodWideDetector:
             ValueError: If insufficient training data
         """
         if exercise_labels is None:
-            exercise_labels = [2, 3, 4, 5]  # Cycling, Walking, Ascending, Descending
+            # PPG-DaLiA: 2=Stairs, 3=Table Soccer, 4=Cycling, 7=Walking
+            exercise_labels = [2, 3, 4, 7]
 
         # Find exercise windows
         exercise_mask = np.isin(labels, exercise_labels)
@@ -217,7 +218,7 @@ class WoodWideDetector:
             Dictionary with performance metrics
         """
         if exercise_labels is None:
-            exercise_labels = [2, 3, 4, 5]
+            exercise_labels = [2, 3, 4, 7]
 
         # Create masks
         is_exercise = np.isin(labels, exercise_labels)

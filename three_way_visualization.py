@@ -71,7 +71,7 @@ def main():
 
     # Method 1: Baseline Threshold
     baseline_alerts = hr_bpm > args.baseline_threshold
-    is_exercise = np.isin(labels, [2, 3, 4, 5])
+    is_exercise = np.isin(labels, [2, 3, 4, 7])
     baseline_metrics = {
         'total_alerts': int(baseline_alerts.sum()),
         'alerts_during_exercise': int((baseline_alerts & is_exercise).sum()),

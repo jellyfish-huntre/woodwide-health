@@ -100,7 +100,7 @@ class IsolationForestDetector:
         self,
         windows: np.ndarray,
         labels: np.ndarray,
-        exercise_labels: list = [2, 3, 4, 5]
+        exercise_labels: list = [2, 3, 4, 7]
     ) -> 'IsolationForestDetector':
         """
         Fit detector on training data.
@@ -243,7 +243,7 @@ def analyze_performance(
     alert_rate = result.alerts.mean()
 
     # Exercise vs rest
-    exercise_labels = [2, 3, 4, 5]
+    exercise_labels = [2, 3, 4, 7]
     exercise_mask = np.isin(labels, exercise_labels)
     rest_mask = ~exercise_mask
 

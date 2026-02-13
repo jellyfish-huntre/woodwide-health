@@ -71,18 +71,22 @@ class PPGDaLiaPreprocessor:
         """
         Extract and structure signals from raw data.
 
+        Handles both real PPG-DaLiA format (BVP as 2D, activity labels in
+        'activity' key at 4 Hz) and synthetic format (BVP as 1D, integer
+        activity labels in 'label' key at TARGET_RATE).
+
         Args:
             data: Raw data dictionary from pickle file
 
         Returns:
             Tuple of (ppg_df, acc_df, labels_df)
         """
-        # Extract signals (structure depends on dataset format)
-        # Typical structure: data['signal']['wrist'] contains PPG and ACC
         signal = data.get('signal', {})
 
-        # PPG signal
-        ppg = signal.get('wrist', {}).get('BVP', np.array([]))  # BVP = Blood Volume Pulse
+        # PPG signal — flatten if 2D (real data has shape (n, 1))
+        ppg = signal.get('wrist', {}).get('BVP', np.array([]))
+        if ppg.ndim > 1:
+            ppg = ppg.ravel()
         ppg_df = pd.DataFrame({
             'ppg': ppg,
             'timestamp': np.arange(len(ppg)) / self.PPG_RATE
@@ -100,11 +104,19 @@ class PPGDaLiaPreprocessor:
         else:
             acc_df = pd.DataFrame()
 
-        # Activity labels
-        labels = data.get('label', np.array([]))
+        # Activity labels — real data stores these in 'activity' (at 4 Hz),
+        # synthetic data stores integer labels in 'label' (at TARGET_RATE)
+        total_duration = len(ppg) / self.PPG_RATE
+        if 'activity' in data:
+            labels = np.array(data['activity']).ravel().astype(int)
+            label_rate = len(labels) / total_duration
+        else:
+            labels = np.array(data.get('label', np.array([]))).ravel()
+            label_rate = self.TARGET_RATE
+
         labels_df = pd.DataFrame({
             'activity': labels,
-            'timestamp': np.arange(len(labels)) / self.TARGET_RATE
+            'timestamp': np.arange(len(labels)) / label_rate
         })
 
         return ppg_df, acc_df, labels_df

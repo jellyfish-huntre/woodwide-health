@@ -14,7 +14,7 @@ from typing import Dict, Optional
 
 def compute_isolation_forest_metrics(if_alerts: np.ndarray, labels: np.ndarray) -> Dict:
     """Compute performance metrics for Isolation Forest detection."""
-    is_exercise = np.isin(labels, [2, 3, 4, 5])
+    is_exercise = np.isin(labels, [2, 3, 4, 7])
 
     return {
         'total_alerts': int(if_alerts.sum()),
