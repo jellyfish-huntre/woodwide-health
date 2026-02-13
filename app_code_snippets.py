@@ -4,6 +4,7 @@ Code snippet utilities for documentation-style Streamlit dashboard.
 Provides professional code display functions for the Health Sync Monitor dashboard.
 """
 
+import re
 import streamlit as st
 from typing import Optional
 from pathlib import Path
@@ -32,7 +33,7 @@ def display_code_snippet(
         st.markdown(f'<div class="code-caption">{caption}</div>', unsafe_allow_html=True)
 
     if file_reference:
-        st.markdown(f'<div class="code-caption">📄 {file_reference}</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="code-caption">{file_reference}</div>', unsafe_allow_html=True)
 
     st.code(code, language=language, line_numbers=line_numbers)
 
@@ -126,10 +127,14 @@ def create_callout(
 
     callout_class = callout_classes.get(type, "info-callout")
 
+    # Convert markdown bold to HTML bold and newlines to <br>
+    rendered = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    rendered = rendered.replace('\n', '<br>')
+
     html = f'<div class="{callout_class}">'
     if title:
         html += f'<strong>{title}</strong><br><br>'
-    html += text
+    html += rendered
     html += '</div>'
 
     st.markdown(html, unsafe_allow_html=True)

@@ -47,7 +47,7 @@ def create_three_way_comparison_chart(
     """
     methods = ['Naive<br>Threshold', 'Isolation<br>Forest', 'Wood Wide']
     fp_rates = [baseline_fp_rate, if_fp_rate, woodwide_fp_rate]
-    colors = ['#e74c3c', '#f39c12', '#27ae60']  # Red, Orange, Green
+    colors = ['#e74c3c', '#f39c12', '#27ae60']
 
     fig = go.Figure()
 
@@ -56,43 +56,24 @@ def create_three_way_comparison_chart(
         y=fp_rates,
         marker_color=colors,
         text=[f'{rate:.1f}%' for rate in fp_rates],
-        textposition='auto',
-        textfont=dict(size=16, color='white', family='Arial Black'),
+        textposition='outside',
+        textfont=dict(size=14, family='Inter'),
         hovertemplate='%{x}<br>FP Rate: %{y:.1f}%<extra></extra>'
     ))
 
-    # Add improvement annotations
-    if baseline_fp_rate > 0:
-        if_improvement = (baseline_fp_rate - if_fp_rate) / baseline_fp_rate * 100
-        ww_improvement = (baseline_fp_rate - woodwide_fp_rate) / baseline_fp_rate * 100
-
-        fig.add_annotation(
-            x=1, y=if_fp_rate + 5,
-            text=f"↓{if_improvement:.0f}%",
-            showarrow=False,
-            font=dict(size=14, color='#f39c12', family='Arial Black')
-        )
-
-        fig.add_annotation(
-            x=2, y=woodwide_fp_rate + 5,
-            text=f"↓{ww_improvement:.0f}%",
-            showarrow=False,
-            font=dict(size=14, color='#27ae60', family='Arial Black')
-        )
-
+    max_rate = max(fp_rates)
     fig.update_layout(
         title=dict(
-            text="Exercise False Positive Rates - Three-Way Comparison",
-            font=dict(size=18, family='Arial Black')
+            text="Exercise False Positive Rates",
+            font=dict(size=16, family='Inter')
         ),
         yaxis=dict(
             title="False Positive Rate (%)",
-            range=[0, min(baseline_fp_rate * 1.2, 105)]
+            range=[0, max(max_rate * 1.15, max_rate + 10)]
         ),
         xaxis_title="Detection Method",
         height=450,
         showlegend=False,
-        plot_bgcolor='rgba(240, 242, 246, 0.5)'
     )
 
     return fig
@@ -210,7 +191,6 @@ def create_three_way_timeline(
         height=700,
         showlegend=False,
         hovermode='x unified',
-        plot_bgcolor='rgba(240, 242, 246, 0.5)'
     )
 
     return fig

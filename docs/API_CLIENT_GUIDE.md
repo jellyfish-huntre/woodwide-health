@@ -2,7 +2,9 @@
 
 ## Overview
 
-The `APIClient` class provides a robust interface for generating multivariate embeddings using the Wood Wide AI API. It handles authentication, request batching, retry logic, and error handling.
+The `APIClient` class provides a robust interface for generating multivariate embeddings using the Wood Wide AI API. It handles authentication, the async training workflow, retry logic, and error handling.
+
+The API uses a multi-step workflow: upload CSV dataset, train an embedding model, poll for training completion, then run inference to retrieve embeddings.
 
 ## Setup
 
@@ -39,15 +41,12 @@ client = APIClient()
 
 # Check API health
 status = client.check_health()
-print(status)  # {'status': 'healthy', 'version': '1.0.0'}
+print(status)  # {'status': 'healthy'}
 
 # Generate embeddings for preprocessed windows
 # windows shape: (n_windows, window_length, n_features)
-embeddings = client.generate_embeddings(
-    windows,
-    batch_size=32,
-    embedding_dim=128
-)
+# Internally: uploads CSV -> trains model -> polls -> runs inference
+embeddings = client.generate_embeddings(windows)
 
 # Close the session
 client.close()
@@ -73,6 +72,19 @@ with APIClient() as client:
     # Session automatically closed
 ```
 
+## API Workflow
+
+The `generate_embeddings()` method orchestrates a multi-step workflow:
+
+1. **Convert to CSV** - Flattens each window `(window_length, n_features)` into a single row
+2. **Upload dataset** - `POST /api/datasets` with multipart CSV file
+3. **Train model** - `POST /api/models/embedding/train` starts training
+4. **Poll status** - `GET /api/models/{id}` until `training_status: "COMPLETE"`
+5. **Run inference** - `POST /api/models/embedding/{id}/infer` returns embeddings
+6. **Parse response** - Converts `{"0": [vec], "1": [vec], ...}` into numpy array
+
+All of this is handled automatically behind the `generate_embeddings()` interface.
+
 ## API Client Features
 
 ### 1. Authentication
@@ -89,6 +101,8 @@ The client handles various error scenarios:
 from src.embeddings.api_client import (
     AuthenticationError,
     RateLimitError,
+    TrainingTimeoutError,
+    SSLConnectionError,
     WoodWideAPIError
 )
 
@@ -98,6 +112,10 @@ except AuthenticationError:
     print("Invalid API key")
 except RateLimitError:
     print("Rate limit exceeded, retry later")
+except TrainingTimeoutError:
+    print("Model training took too long")
+except SSLConnectionError:
+    print("SSL handshake failed - try setting WOOD_WIDE_SSL_CIPHERS")
 except WoodWideAPIError as e:
     print(f"API error: {e}")
 ```
@@ -116,17 +134,15 @@ client = APIClient(
 )
 ```
 
-### 4. Batching
+### 4. Training Timeout
 
-Large datasets are automatically batched to avoid memory issues:
+Model training is polled until complete, with configurable timeout:
 
 ```python
-# Process 1000 windows in batches of 32
-embeddings = client.generate_embeddings(
-    windows,  # shape: (1000, 960, 5)
-    batch_size=32
+client = APIClient(
+    training_timeout=600,  # Max 10 minutes for training (default)
+    poll_interval=5.0      # Check every 5 seconds (default)
 )
-# embeddings shape: (1000, 128)
 ```
 
 ### 5. Request Logging
@@ -138,8 +154,11 @@ import logging
 
 logging.basicConfig(level=logging.INFO)
 # Now you'll see request details:
-# INFO:api_client:Generating embeddings for 114 windows (batch_size=32)
-# INFO:api_client:Processing batch 1/4
+# INFO:api_client:Generating embeddings for 114 windows
+# INFO:api_client:Uploading dataset 'health_windows_a1b2c3d4'...
+# INFO:api_client:Waiting for training to complete...
+# INFO:api_client:Model model_id training complete
+# INFO:api_client:Running inference...
 ```
 
 ## Command-Line Usage
@@ -153,33 +172,34 @@ python3 generate_embeddings.py 1
 # Using mock API (for testing)
 python3 generate_embeddings.py 1 --mock
 
-# Custom batch size and embedding dimension
+# Custom dataset and model names
 python3 generate_embeddings.py 1 \
-    --batch-size 64 \
-    --embedding-dim 256
+    --dataset-name my_health_data \
+    --model-name my_embed_model
 ```
 
 ## API Methods
 
-### `generate_embeddings(windows, batch_size, embedding_dim)`
+### `generate_embeddings(windows, dataset_name, model_name)`
 
-Generate embeddings for multiple windows.
+Generate embeddings for multiple windows via the upload-train-infer workflow.
 
 **Args:**
 - `windows` (ndarray): Shape `(n_windows, window_length, n_features)`
-- `batch_size` (int): Windows per API request (default: 32)
-- `embedding_dim` (int): Target embedding dimension (default: API's default)
+- `dataset_name` (str, optional): Name for uploaded dataset (auto-generated if None)
+- `model_name` (str, optional): Name for trained model (auto-generated if None)
+- `batch_size` (int): Kept for backward compatibility (ignored)
+- `embedding_dim` (int): Kept for backward compatibility (ignored)
 
 **Returns:**
 - `ndarray`: Shape `(n_windows, embedding_dim)`
 
-### `generate_single_embedding(window, embedding_dim)`
+### `generate_single_embedding(window)`
 
-Generate embedding for a single window.
+Generate embedding for a single window. Triggers a full upload-train-infer cycle.
 
 **Args:**
 - `window` (ndarray): Shape `(window_length, n_features)`
-- `embedding_dim` (int): Target embedding dimension
 
 **Returns:**
 - `ndarray`: Shape `(embedding_dim,)`
@@ -189,14 +209,22 @@ Generate embedding for a single window.
 Check API health status.
 
 **Returns:**
-- `dict`: Status information
+- `dict`: `{"status": "healthy"}` on success
 
-### `get_embedding_info()`
+### `get_user_info()`
 
-Get information about available models.
+Get authenticated user info including credits and resource IDs.
 
 **Returns:**
-- `dict`: Model capabilities and configurations
+- `dict`: With `wwai_credits`, `dataset_ids`, `model_ids`, etc.
+
+### `list_datasets()`
+
+List all uploaded datasets.
+
+### `list_models()`
+
+List all trained models.
 
 ## Advanced Configuration
 
@@ -205,7 +233,7 @@ Get information about available models.
 ```python
 client = APIClient(
     api_key="your_key",
-    base_url="https://custom.api.com/v1"
+    base_url="https://custom.api.com"
 )
 ```
 
@@ -240,8 +268,8 @@ with APIClient() as client:
 # All tests
 pytest tests/test_api_client.py -v
 
-# Specific test
-pytest tests/test_api_client.py::TestMockAPIClient::test_batching -v
+# Response handling tests
+pytest tests/test_api_response_handling.py -v
 
 # With coverage
 pytest tests/test_api_client.py --cov=src.embeddings
@@ -261,27 +289,6 @@ else:
 embeddings = client.generate_embeddings(windows)
 ```
 
-## Performance Tips
-
-1. **Batch Size:** Larger batches are faster but use more memory
-   - Small datasets: `batch_size=64`
-   - Large datasets: `batch_size=32`
-
-2. **Connection Reuse:** Use context manager or reuse client instance
-
-3. **Parallel Processing:** For multiple subjects, consider parallel requests:
-   ```python
-   from concurrent.futures import ThreadPoolExecutor
-
-   def process_subject(subject_id):
-       with APIClient() as client:
-           data = load_subject(subject_id)
-           return client.generate_embeddings(data['windows'])
-
-   with ThreadPoolExecutor(max_workers=4) as executor:
-       results = executor.map(process_subject, range(1, 16))
-   ```
-
 ## Troubleshooting
 
 ### Authentication Errors
@@ -298,7 +305,36 @@ AuthenticationError: API key not found
 RateLimitError: Rate limit exceeded
 ```
 
-**Solution:** The client automatically retries. For persistent issues, reduce `batch_size` or add delays between requests.
+**Solution:** The client automatically retries. For persistent issues, add delays between requests.
+
+### SSL Handshake Failures
+
+```
+SSLConnectionError: SSL handshake failed connecting to https://beta.woodwide.ai/health
+```
+
+**Cause:** OpenSSL 3.0+ uses stricter default cipher settings that may be incompatible with the API server.
+
+**Solution 1:** Set a broader cipher configuration in your `.env` file:
+```bash
+WOOD_WIDE_SSL_CIPHERS=DEFAULT:@SECLEVEL=0
+```
+
+**Solution 2:** Pass cipher configuration programmatically:
+```python
+client = APIClient(ssl_ciphers="DEFAULT:@SECLEVEL=0")
+```
+
+### Training Timeout
+
+```
+TrainingTimeoutError: Model training did not complete within 600s
+```
+
+**Solution:** Increase the training timeout:
+```python
+client = APIClient(training_timeout=1200)  # 20 minutes
+```
 
 ### Timeout Errors
 
@@ -313,30 +349,30 @@ client = APIClient(timeout=120)  # 2 minutes
 
 ## API Response Format
 
-The API returns embeddings in this format:
+The inference endpoint returns embeddings indexed by row:
 
 ```json
 {
-  "embeddings": [
-    [0.123, -0.456, 0.789, ...],  // Window 1 (128-dim)
-    [0.234, -0.567, 0.890, ...],  // Window 2 (128-dim)
-    ...
-  ]
+  "0": [0.123, -0.456, 0.789, ...],
+  "1": [0.234, -0.567, 0.890, ...],
+  ...
 }
 ```
 
+The client automatically converts this into a numpy array of shape `(n_windows, embedding_dim)`.
+
 ## Security Best Practices
 
-1. ✅ **Never commit `.env` file** (already in `.gitignore`)
-2. ✅ **Use environment variables** for API keys
-3. ✅ **Rotate API keys** periodically
-4. ✅ **Use HTTPS** (enforced by client)
-5. ✅ **Monitor API usage** to detect anomalies
+1. **Never commit `.env` file** (already in `.gitignore`)
+2. **Use environment variables** for API keys
+3. **Rotate API keys** periodically
+4. **Use HTTPS** (enforced by client)
+5. **Monitor API usage** to detect anomalies
 
 ## Support
 
 For API-related issues:
-- Check Wood Wide API documentation
+- Check Wood Wide API documentation at https://docs.woodwide.ai
 - Verify API key is valid
 - Check API status at https://status.woodwide.ai
 - Contact Wood Wide support for quota increases

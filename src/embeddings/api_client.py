@@ -1,17 +1,25 @@
 """
 Wood Wide API Client for generating multivariate embeddings.
 
-This client handles authentication, request formatting, batching,
-and error handling for the Wood Wide API.
+This client handles authentication, request formatting, the async
+training workflow, and error handling for the Wood Wide API.
+
+Workflow: upload CSV dataset → train embedding model → poll for
+completion → run inference → return embeddings.
 """
 
+import csv
+import hashlib
+import io
 import os
+import ssl
 import time
 import requests
+from requests.adapters import HTTPAdapter
 import numpy as np
-from typing import List, Dict, Optional, Union, Tuple
-from pathlib import Path
+from typing import Callable, Dict, Optional
 from dotenv import load_dotenv
+from urllib3.util.ssl_ import create_urllib3_context
 import logging
 
 # Load environment variables
@@ -37,6 +45,32 @@ class RateLimitError(WoodWideAPIError):
     pass
 
 
+class SSLConnectionError(WoodWideAPIError):
+    """Raised when SSL/TLS handshake or connection fails."""
+    pass
+
+
+class TrainingTimeoutError(WoodWideAPIError):
+    """Raised when model training does not complete within the timeout."""
+    pass
+
+
+class _SSLAdapter(HTTPAdapter):
+    """HTTPAdapter that applies a custom SSL context to all connections."""
+
+    def __init__(self, ssl_context=None, **kwargs):
+        self._ssl_context = ssl_context
+        super().__init__(**kwargs)
+
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = self._ssl_context
+        return super().init_poolmanager(*args, **kwargs)
+
+    def proxy_manager_for(self, proxy, **proxy_kwargs):
+        proxy_kwargs["ssl_context"] = self._ssl_context
+        return super().proxy_manager_for(proxy, **proxy_kwargs)
+
+
 class APIClient:
     """
     Client for Wood Wide AI multivariate embedding API.
@@ -44,6 +78,9 @@ class APIClient:
     This client transforms time-series health data (PPG + accelerometer)
     into latent embeddings that capture contextual relationships between
     heart rate and physical activity.
+
+    The workflow is: upload CSV → train embedding model → poll until
+    complete → run inference → return embeddings as numpy array.
 
     Example:
         >>> client = APIClient()
@@ -57,7 +94,10 @@ class APIClient:
         base_url: Optional[str] = None,
         timeout: int = 30,
         max_retries: int = 3,
-        retry_delay: float = 1.0
+        retry_delay: float = 1.0,
+        ssl_ciphers: Optional[str] = None,
+        training_timeout: int = 600,
+        poll_interval: float = 5.0
     ):
         """
         Initialize Wood Wide API client.
@@ -68,6 +108,9 @@ class APIClient:
             timeout: Request timeout in seconds (default: 30)
             max_retries: Maximum number of retry attempts (default: 3)
             retry_delay: Delay between retries in seconds (default: 1.0)
+            ssl_ciphers: SSL cipher string override. If None, reads from WOOD_WIDE_SSL_CIPHERS env var.
+            training_timeout: Max seconds to wait for model training (default: 600)
+            poll_interval: Seconds between training status polls (default: 5.0)
 
         Raises:
             AuthenticationError: If API key is not provided or found in environment
@@ -76,7 +119,7 @@ class APIClient:
         self.api_key = api_key or os.getenv("WOOD_WIDE_API_KEY")
         self.base_url = base_url or os.getenv(
             "WOOD_WIDE_API_URL",
-            "https://api.woodwide.ai/v1"
+            "https://beta.woodwide.ai"
         )
 
         if not self.api_key:
@@ -88,35 +131,55 @@ class APIClient:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.ssl_ciphers = ssl_ciphers or os.getenv("WOOD_WIDE_SSL_CIPHERS")
+        self.training_timeout = training_timeout
+        self.poll_interval = poll_interval
 
-        # Session for connection pooling
+        # Session for connection pooling (no Content-Type — set per-request)
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
             "User-Agent": "HealthSyncMonitor/1.0"
         })
 
+        # Mount SSL adapter for OpenSSL 3.0+ compatibility
+        ssl_context = self._create_ssl_context(ciphers=self.ssl_ciphers)
+        self.session.mount("https://", _SSLAdapter(ssl_context=ssl_context))
+
         logger.info(f"Initialized Wood Wide API client: {self.base_url}")
+
+    @staticmethod
+    def _create_ssl_context(ciphers: Optional[str] = None) -> ssl.SSLContext:
+        """Create an SSL context with broader cipher suite support for OpenSSL 3.0+."""
+        ctx = create_urllib3_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.set_ciphers(ciphers or "DEFAULT:@SECLEVEL=0")
+        return ctx
 
     def _make_request(
         self,
         method: str,
         endpoint: str,
         data: Optional[Dict] = None,
-        params: Optional[Dict] = None
-    ) -> Dict:
+        params: Optional[Dict] = None,
+        files: Optional[Dict] = None,
+        expect_json: bool = True,
+        use_form: bool = False
+    ) -> Optional[Dict]:
         """
         Make HTTP request with retry logic.
 
         Args:
             method: HTTP method (GET, POST, etc.)
-            endpoint: API endpoint (e.g., '/embeddings')
-            data: Request body data
+            endpoint: API endpoint (e.g., '/api/datasets')
+            data: Request body data (sent as JSON by default)
             params: Query parameters
+            files: Multipart file uploads (when provided, data is sent as form fields)
+            expect_json: If False, don't attempt to parse response as JSON
+            use_form: If True, send data as form-encoded instead of JSON
 
         Returns:
-            Response JSON data
+            Response JSON data, or None if expect_json is False
 
         Raises:
             WoodWideAPIError: If request fails after retries
@@ -126,13 +189,38 @@ class APIClient:
 
         for attempt in range(self.max_retries):
             try:
-                response = self.session.request(
-                    method=method,
-                    url=url,
-                    json=data,
-                    params=params,
-                    timeout=self.timeout
-                )
+                # Reset file streams for retries (BytesIO gets consumed on each request)
+                if files:
+                    for file_tuple in files.values():
+                        if hasattr(file_tuple[1], 'seek'):
+                            file_tuple[1].seek(0)
+
+                # When files are provided, use multipart form data
+                if files:
+                    response = self.session.request(
+                        method=method,
+                        url=url,
+                        data=data,
+                        files=files,
+                        params=params,
+                        timeout=self.timeout
+                    )
+                elif use_form:
+                    response = self.session.request(
+                        method=method,
+                        url=url,
+                        data=data,
+                        params=params,
+                        timeout=self.timeout
+                    )
+                else:
+                    response = self.session.request(
+                        method=method,
+                        url=url,
+                        json=data,
+                        params=params,
+                        timeout=self.timeout
+                    )
 
                 # Handle rate limiting
                 if response.status_code == 429:
@@ -144,6 +232,8 @@ class APIClient:
                 # Raise for error status codes
                 response.raise_for_status()
 
+                if not expect_json:
+                    return None
                 return response.json()
 
             except requests.exceptions.HTTPError as e:
@@ -155,7 +245,22 @@ class APIClient:
                     raise WoodWideAPIError(f"HTTP error after {self.max_retries} retries: {e}")
                 else:
                     logger.warning(f"Request failed (attempt {attempt + 1}/{self.max_retries}): {e}")
-                    time.sleep(self.retry_delay * (2 ** attempt))  # Exponential backoff
+                    time.sleep(self.retry_delay * (2 ** attempt))
+
+            except requests.exceptions.SSLError as e:
+                error_msg = str(e)
+                if "HANDSHAKE_FAILURE" in error_msg or "handshake" in error_msg.lower():
+                    raise SSLConnectionError(
+                        f"SSL handshake failed connecting to {url}. "
+                        f"This may be caused by cipher suite incompatibility with OpenSSL 3.0+. "
+                        f"Try setting WOOD_WIDE_SSL_CIPHERS='DEFAULT:@SECLEVEL=0' in your .env file. "
+                        f"Original error: {e}"
+                    )
+                if attempt == self.max_retries - 1:
+                    raise SSLConnectionError(f"SSL error after {self.max_retries} retries: {e}")
+                else:
+                    logger.warning(f"SSL error (attempt {attempt + 1}/{self.max_retries}): {e}")
+                    time.sleep(self.retry_delay * (2 ** attempt))
 
             except requests.exceptions.Timeout as e:
                 if attempt == self.max_retries - 1:
@@ -171,76 +276,214 @@ class APIClient:
                     logger.warning(f"Request error (attempt {attempt + 1}/{self.max_retries}): {e}")
                     time.sleep(self.retry_delay)
 
+    # ---- Dataset & model workflow helpers ----
+
+    @staticmethod
+    def _windows_to_csv_bytes(windows: np.ndarray) -> bytes:
+        """Convert windows array to CSV bytes for upload.
+
+        Each window (window_length x n_features) is flattened to a single row.
+        This way each row in the dataset produces one embedding vector.
+
+        Args:
+            windows: Shape (n_windows, window_length, n_features)
+
+        Returns:
+            CSV file content as bytes
+        """
+        n_windows = windows.shape[0]
+        flat = windows.reshape(n_windows, -1)
+        n_cols = flat.shape[1]
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([f"f_{i}" for i in range(n_cols)])
+        for row in flat:
+            writer.writerow(row.tolist())
+
+        return buf.getvalue().encode("utf-8")
+
+    def _upload_dataset(self, csv_bytes: bytes, name: str, overwrite: bool = True) -> Dict:
+        """Upload CSV data as a dataset.
+
+        POST /api/datasets with multipart form: file + name + overwrite fields.
+
+        Args:
+            csv_bytes: CSV file content
+            name: Dataset name
+            overwrite: If True, overwrite existing dataset with same name
+
+        Returns:
+            Response dict with 'id', 'name', 'size', 'schema'
+        """
+        files = {"file": (f"{name}.csv", io.BytesIO(csv_bytes), "text/csv")}
+        data = {"name": name, "overwrite": str(overwrite).lower()}
+        return self._make_request("POST", "/api/datasets", data=data, files=files)
+
+    def _delete_dataset(self, dataset_id: str) -> None:
+        """Delete a dataset by ID.
+
+        DELETE /api/datasets/{dataset_id}
+        """
+        self._make_request("DELETE", f"/api/datasets/{dataset_id}", expect_json=False)
+
+    def _train_model(self, dataset_name: str, model_name: str, overwrite: bool = True) -> Dict:
+        """Start training an embedding model.
+
+        POST /api/models/embedding/train?dataset_name=<name>
+
+        Returns:
+            Response dict with 'id', 'training_status': 'PENDING'
+        """
+        return self._make_request(
+            "POST",
+            "/api/models/embedding/train",
+            data={"model_name": model_name, "overwrite": overwrite},
+            params={"dataset_name": dataset_name},
+            use_form=True
+        )
+
+    def _poll_model_status(
+        self,
+        model_id: str,
+        progress_callback: Optional[Callable] = None
+    ) -> Dict:
+        """Poll model status until training completes.
+
+        GET /api/models/{model_id} repeatedly until COMPLETE or timeout.
+
+        Args:
+            model_id: Model ID to poll
+            progress_callback: Optional callback(step, message) for progress updates
+
+        Returns:
+            Model info dict with training_status == 'COMPLETE'
+
+        Raises:
+            TrainingTimeoutError: If training does not complete in time
+            WoodWideAPIError: If training fails
+        """
+        start = time.time()
+        while True:
+            model_info = self._make_request("GET", f"/api/models/{model_id}")
+            status = model_info.get("training_status", "UNKNOWN")
+
+            elapsed = time.time() - start
+            if status == "COMPLETE":
+                msg = f"Model {model_id} training complete ({elapsed:.0f}s)"
+                logger.info(msg)
+                if progress_callback:
+                    progress_callback("poll_done", msg)
+                return model_info
+            elif status in ("FAILED", "ERROR"):
+                raise WoodWideAPIError(f"Model training failed with status: {status}")
+
+            if elapsed > self.training_timeout:
+                raise TrainingTimeoutError(
+                    f"Model training did not complete within {self.training_timeout}s "
+                    f"(last status: {status})"
+                )
+
+            msg = f"Model {model_id} status: {status} (elapsed: {elapsed:.0f}s)"
+            logger.info(msg)
+            if progress_callback:
+                progress_callback("poll_status", msg)
+            time.sleep(self.poll_interval)
+
+    def _infer(self, model_id: str, dataset_id: str) -> Dict:
+        """Run inference to get embeddings.
+
+        POST /api/models/embedding/{model_id}/infer?dataset_id=<id>
+
+        Returns:
+            Dict mapping row_index (str) -> embedding vector (list of floats)
+        """
+        return self._make_request(
+            "POST",
+            f"/api/models/embedding/{model_id}/infer",
+            params={"dataset_id": dataset_id}
+        )
+
+    # ---- Public API ----
+
     def generate_embeddings(
         self,
         windows: np.ndarray,
         batch_size: int = 32,
-        embedding_dim: Optional[int] = None
+        embedding_dim: Optional[int] = None,
+        dataset_name: Optional[str] = None,
+        model_name: Optional[str] = None,
+        progress_callback: Optional[Callable] = None
     ) -> np.ndarray:
         """
         Generate embeddings for time-series windows.
 
-        This is the main method for transforming preprocessed health data
-        into multivariate embeddings that capture contextual relationships.
+        Orchestrates the full workflow: convert to CSV → upload dataset →
+        train embedding model → poll until complete → run inference.
 
         Args:
             windows: Array of shape (n_windows, window_length, n_features)
-                     Each window contains synchronized PPG and accelerometer data
-            batch_size: Number of windows to process per API call (default: 32)
-            embedding_dim: Target embedding dimension (default: API's default)
+            batch_size: Ignored (kept for backward compatibility)
+            embedding_dim: Ignored (kept for backward compatibility)
+            dataset_name: Name for the uploaded dataset (auto-generated if None)
+            model_name: Name for the trained model (auto-generated if None)
+            progress_callback: Optional callback(step, message) for progress updates.
+                Steps: csv, upload, upload_done, train, train_done, poll,
+                poll_status, poll_done, infer, done.
 
         Returns:
             Array of shape (n_windows, embedding_dim) containing embeddings
-
-        Example:
-            >>> # windows shape: (114, 960, 5)
-            >>> embeddings = client.generate_embeddings(windows)
-            >>> # embeddings shape: (114, 128)
         """
+        def _notify(step: str, message: str):
+            logger.info(message)
+            if progress_callback:
+                progress_callback(step, message)
+
         n_windows = windows.shape[0]
-        logger.info(f"Generating embeddings for {n_windows} windows (batch_size={batch_size})")
+        if n_windows == 0:
+            return np.empty((0, 0), dtype=np.float32)
 
-        all_embeddings = []
+        _notify("start", f"Generating embeddings for {n_windows} windows")
 
-        # Process in batches
-        for batch_start in range(0, n_windows, batch_size):
-            batch_end = min(batch_start + batch_size, n_windows)
-            batch = windows[batch_start:batch_end]
+        # Generate deterministic names from data content
+        data_hash = hashlib.md5(windows.tobytes()[:1024]).hexdigest()[:8]
+        dataset_name = dataset_name or f"health_windows_{data_hash}"
+        model_name = model_name or f"health_embed_{data_hash}"
 
-            logger.info(f"Processing batch {batch_start//batch_size + 1}/{(n_windows + batch_size - 1)//batch_size}")
+        # Step 1: Convert windows to CSV
+        _notify("csv", f"Converting {n_windows} windows to CSV format...")
+        csv_bytes = self._windows_to_csv_bytes(windows)
 
-            # Convert to list format for JSON serialization
-            batch_data = {
-                "windows": batch.tolist(),
-                "config": {
-                    "embedding_dim": embedding_dim,
-                    "normalize": True
-                }
-            }
+        # Step 2: Upload dataset
+        _notify("upload", f"Uploading dataset '{dataset_name}'...")
+        dataset_info = self._upload_dataset(csv_bytes, dataset_name)
+        dataset_id = dataset_info["id"]
+        _notify("upload_done", f"Dataset uploaded: id={dataset_id}")
 
-            # Make API request
-            response = self._make_request(
-                method="POST",
-                endpoint="/embeddings",
-                data=batch_data
-            )
+        # Step 3: Train model
+        _notify("train", f"Starting model training '{model_name}'...")
+        train_response = self._train_model(dataset_name, model_name)
+        model_id = train_response["id"]
+        _notify("train_done", f"Training started: model_id={model_id}")
 
-            # Extract embeddings from response
-            batch_embeddings = np.array(response["embeddings"])
-            all_embeddings.append(batch_embeddings)
+        # Step 4: Poll until complete
+        _notify("poll", "Waiting for training to complete...")
+        self._poll_model_status(model_id, progress_callback=progress_callback)
 
-            # Be nice to the API
-            time.sleep(0.1)
+        # Step 5: Run inference
+        _notify("infer", "Running inference...")
+        infer_response = self._infer(model_id, dataset_id)
 
-        # Concatenate all batches
-        if len(all_embeddings) == 0:
-            # Handle empty input
-            embedding_dim_actual = embedding_dim or 128  # Default dimension
-            embeddings = np.empty((0, embedding_dim_actual), dtype=np.float32)
-        else:
-            embeddings = np.vstack(all_embeddings)
+        # Step 6: Parse response into numpy array
+        # Response format: {"embeddings": {"0": [vec], "1": [vec], ...}}
+        embeddings_dict = infer_response.get("embeddings", infer_response)
+        embeddings_list = []
+        for i in range(n_windows):
+            vec = embeddings_dict[str(i)]
+            embeddings_list.append(vec)
 
-        logger.info(f"Generated embeddings shape: {embeddings.shape}")
+        embeddings = np.array(embeddings_list, dtype=np.float32)
+        _notify("done", f"Generated embeddings shape: {embeddings.shape}")
         return embeddings
 
     def generate_single_embedding(
@@ -251,18 +494,18 @@ class APIClient:
         """
         Generate embedding for a single window.
 
-        Convenience method for processing one window at a time.
+        WARNING: This triggers a full upload-train-infer cycle for one window.
+        Prefer generate_embeddings() with multiple windows for efficiency.
 
         Args:
             window: Array of shape (window_length, n_features)
-            embedding_dim: Target embedding dimension
+            embedding_dim: Ignored (kept for backward compatibility)
 
         Returns:
             Array of shape (embedding_dim,) containing the embedding
         """
-        # Add batch dimension
         windows = np.expand_dims(window, axis=0)
-        embeddings = self.generate_embeddings(windows, batch_size=1, embedding_dim=embedding_dim)
+        embeddings = self.generate_embeddings(windows, embedding_dim=embedding_dim)
         return embeddings[0]
 
     def check_health(self) -> Dict:
@@ -277,26 +520,33 @@ class APIClient:
             >>> print(status['status'])  # 'healthy'
         """
         try:
-            response = self._make_request("GET", "/health")
+            self._make_request("GET", "/health", expect_json=False)
             logger.info("API health check successful")
-            return response
+            return {"status": "healthy"}
         except Exception as e:
             logger.error(f"API health check failed: {e}")
             raise
 
-    def get_embedding_info(self) -> Dict:
+    def get_user_info(self) -> Dict:
         """
-        Get information about available embedding models.
+        Get authenticated user info including credits and resource IDs.
 
         Returns:
-            Dictionary with model information (dimensions, capabilities, etc.)
+            Dictionary with wwai_credits, dataset_ids, model_ids, etc.
 
         Example:
-            >>> info = client.get_embedding_info()
-            >>> print(info['models'])
+            >>> info = client.get_user_info()
+            >>> print(info['wwai_credits'])
         """
-        response = self._make_request("GET", "/embeddings/info")
-        return response
+        return self._make_request("GET", "/auth/me")
+
+    def list_datasets(self) -> list:
+        """List all datasets. GET /api/datasets."""
+        return self._make_request("GET", "/api/datasets")
+
+    def list_models(self) -> list:
+        """List all models. GET /api/models."""
+        return self._make_request("GET", "/api/models")
 
     def close(self):
         """Close the API session."""
@@ -316,8 +566,8 @@ class MockAPIClient(APIClient):
     """
     Mock API client for testing without real API calls.
 
-    Generates random embeddings with the same shape as real API responses.
-    Useful for development and testing.
+    Simulates the full upload → train → infer workflow with deterministic
+    embeddings. Useful for development and testing.
     """
 
     def __init__(self, embedding_dim: int = 128, **kwargs):
@@ -330,49 +580,94 @@ class MockAPIClient(APIClient):
         """
         # Don't call super().__init__() to avoid API key requirement
         self.embedding_dim = embedding_dim
-        self.base_url = "mock://api.woodwide.ai/v1"
+        self.base_url = "mock://beta.woodwide.ai"
+        self.training_timeout = 600
+        self.poll_interval = 0  # No delay in mock
+        self._mock_datasets = {}
+        self._mock_models = {}
+        self._dataset_counter = 0
+        self._model_counter = 0
         logger.info(f"Initialized Mock API client (embedding_dim={embedding_dim})")
 
-    def _make_request(self, method: str, endpoint: str, data: Optional[Dict] = None, **kwargs) -> Dict:
-        """Mock request that returns fake data."""
+    def _make_request(self, method: str, endpoint: str, data=None,
+                      params=None, files=None, expect_json=True,
+                      use_form=False):
+        """Mock request that simulates all API endpoints."""
         logger.info(f"Mock request: {method} {endpoint}")
 
-        if endpoint == "/health":
-            return {"status": "healthy", "version": "1.0.0-mock"}
+        # GET /health
+        if endpoint == "/health" and method == "GET":
+            return None
 
-        elif endpoint == "/embeddings/info":
+        # GET /auth/me
+        if endpoint == "/auth/me" and method == "GET":
             return {
-                "models": [
-                    {
-                        "name": "multivariate-v1",
-                        "embedding_dim": self.embedding_dim,
-                        "max_sequence_length": 1024
-                    }
-                ]
+                "identity_type": "api",
+                "username": "mock_user",
+                "dataset_ids": list(self._mock_datasets.keys()),
+                "model_ids": list(self._mock_models.keys()),
+                "created_at": None
             }
 
-        elif endpoint == "/embeddings" and data:
-            # Generate deterministic embeddings based on input
-            windows = np.array(data["windows"])
-            n_windows = windows.shape[0]
+        # POST /api/datasets
+        if endpoint == "/api/datasets" and method == "POST":
+            self._dataset_counter += 1
+            ds_id = f"ds_mock_{self._dataset_counter}"
+            name = data.get("name", "unnamed") if data else "unnamed"
+            csv_content = b""
+            if files and "file" in files:
+                file_tuple = files["file"]
+                csv_content = file_tuple[1].read()
+                file_tuple[1].seek(0)
+            self._mock_datasets[ds_id] = {"csv": csv_content, "name": name}
+            return {"id": ds_id, "name": name, "size": len(csv_content), "schema": {}}
 
-            embeddings = []
-            for window in windows:
-                # Create deterministic embedding based on window content
-                # Use hash of window data as seed for reproducibility
-                window_hash = hash(window.tobytes()) % (2**31)
-                rng = np.random.RandomState(window_hash)
-                embedding = rng.randn(self.embedding_dim).astype(np.float32)
+        # DELETE /api/datasets/{dataset_id}
+        if endpoint.startswith("/api/datasets/") and method == "DELETE":
+            ds_id = endpoint.split("/")[-1]
+            self._mock_datasets.pop(ds_id, None)
+            return None
 
-                # Normalize to unit length (common for embeddings)
-                embedding = embedding / np.linalg.norm(embedding)
-                embeddings.append(embedding)
+        # GET /api/datasets
+        if endpoint == "/api/datasets" and method == "GET":
+            return [{"id": k, "name": v["name"]} for k, v in self._mock_datasets.items()]
 
-            embeddings = np.array(embeddings)
-            return {"embeddings": embeddings.tolist()}
+        # POST /api/models/embedding/train
+        if endpoint == "/api/models/embedding/train" and method == "POST":
+            self._model_counter += 1
+            model_id = f"model_mock_{self._model_counter}"
+            self._mock_models[model_id] = {"training_status": "COMPLETE"}
+            return {"id": model_id, "training_status": "PENDING"}
 
-        else:
-            raise WoodWideAPIError(f"Mock endpoint not implemented: {endpoint}")
+        # GET /api/models/{model_id}
+        if endpoint.startswith("/api/models/") and method == "GET" and "/infer" not in endpoint:
+            model_id = endpoint.split("/")[-1]
+            info = self._mock_models.get(model_id, {"training_status": "COMPLETE"})
+            return {"id": model_id, **info}
+
+        # POST /api/models/embedding/{model_id}/infer
+        if "/infer" in endpoint and method == "POST":
+            dataset_id = params.get("dataset_id") if params else None
+            csv_content = self._mock_datasets.get(dataset_id, {}).get("csv", b"")
+
+            # Count rows (subtract 1 for header)
+            n_rows = max(csv_content.count(b"\n") - 1, 0) if csv_content else 0
+
+            # Generate deterministic embeddings seeded on CSV content
+            csv_hash = hash(csv_content) % (2**31)
+            embeddings = {}
+            for i in range(n_rows):
+                rng = np.random.RandomState((csv_hash + i) % (2**31))
+                vec = rng.randn(self.embedding_dim).astype(np.float32)
+                vec = vec / np.linalg.norm(vec)
+                embeddings[str(i)] = vec.tolist()
+            return {"embeddings": embeddings}
+
+        # GET /api/models
+        if endpoint == "/api/models" and method == "GET":
+            return [{"id": k, **v} for k, v in self._mock_models.items()]
+
+        raise WoodWideAPIError(f"Mock endpoint not implemented: {method} {endpoint}")
 
     def close(self):
         """Mock close (no-op)."""

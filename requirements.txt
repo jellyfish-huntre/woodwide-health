@@ -21,6 +21,9 @@ python-dotenv>=1.0.0
 pytest>=7.4.0
 pytest-cov>=4.1.0
 
+# Console output
+rich>=13.0.0
+
 # Scientific computing (for signal processing)
 scipy>=1.11.0
 

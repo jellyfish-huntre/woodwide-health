@@ -16,8 +16,10 @@ SECTION_INTROS = {
 - Wood Wide API key (set in `.env`)
 - Preprocessed health data (PPG + accelerometer)""",
 
-    "baseline": """This section demonstrates why simple threshold detection fails for health monitoring.
-You'll see how threshold methods produce high false positive rates during exercise.""",
+    "baseline": """This section demonstrates why classic detection approaches fail for health monitoring.
+You'll see how both simple thresholds and statistical outlier detection (Isolation Forest)
+produce unacceptable false positive rates during exercise, motivating the need for
+context-aware embeddings.""",
 
     "woodwide": """This section demonstrates how Wood Wide embeddings enable context-aware detection
 by learning the relationship between heart rate and physical activity.
@@ -71,6 +73,36 @@ Embeddings encode contextual relationships between signals:
 - **High HR + Low activity** → Embedding far from centroid → Alert
 
 This is fundamentally different from threshold methods that examine signals independently.""",
+
+    "isolation_forest_how_it_works": """### How Isolation Forest Works
+
+Isolation Forest detects anomalies by measuring how easy data points are to "isolate"
+using random splits. Unusual points need fewer splits to be separated from the rest.
+
+**Feature Engineering (the bottleneck):**
+
+```python
+# For each 30-second window, extract 10 hand-crafted features:
+means = windows.mean(axis=1)   # Mean of PPG, ACC_X, ACC_Y, ACC_Z, ACC_MAG
+stds  = windows.std(axis=1)    # Std of PPG, ACC_X, ACC_Y, ACC_Z, ACC_MAG
+features = concat([means, stds])  # Shape: (n_windows, 10)
+```
+
+**Training:** Fit on exercise windows to learn what "normal" feature distributions look like.
+
+**Detection:** Score each window by isolation depth. Easy to isolate = anomalous.
+
+### Why This Is Better Than Threshold
+
+Isolation Forest considers **multiple signals simultaneously** (PPG + all 3 accelerometer axes),
+not just heart rate alone. This gives it some ability to detect unusual signal combinations.
+
+### Why This Still Falls Short
+
+The 10 hand-crafted features (mean/std per signal) **cannot encode temporal relationships**
+between heart rate and physical activity. A window with high HR + high activity produces similar
+feature statistics to high HR + low activity if the magnitudes happen to align. The model
+sees the same numbers and can't distinguish the two scenarios.""",
 
     "interpretation_guide": """**How to interpret the chart:**
 - **Blue line (accelerometer):** Physical activity level

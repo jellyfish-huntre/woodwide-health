@@ -23,7 +23,8 @@ def send_windows_to_woodwide(
     batch_size: int = 32,
     embedding_dim: Optional[int] = None,
     validate_input: bool = True,
-    use_mock: bool = False
+    use_mock: bool = False,
+    progress_callback=None
 ) -> Tuple[np.ndarray, Dict]:
     """
     Send windowed time-series data to Wood Wide API and retrieve embeddings.
@@ -43,6 +44,8 @@ def send_windows_to_woodwide(
         embedding_dim: Target embedding dimension (None = API default)
         validate_input: Whether to validate input data format and ranges
         use_mock: Use mock client instead of real API (for testing)
+        progress_callback: Optional callback(step, message) for progress updates.
+                          Passed through to APIClient.generate_embeddings().
 
     Returns:
         Tuple of (embeddings, metadata):
@@ -94,7 +97,8 @@ def send_windows_to_woodwide(
         embeddings = client.generate_embeddings(
             windows,
             batch_size=batch_size,
-            embedding_dim=embedding_dim
+            embedding_dim=embedding_dim,
+            progress_callback=progress_callback
         )
 
         # Step 5: Validate output

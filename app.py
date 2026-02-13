@@ -25,7 +25,6 @@ load_dotenv()
 
 from src.detectors.woodwide import WoodWideDetector, DetectionResult
 from src.detectors.isolation_forest_detector import IsolationForestDetector
-from src.detectors.isolation_forest_detector import IsolationForestDetector
 from src.embeddings.generate import send_windows_to_woodwide
 from src.ingestion.preprocess import PPGDaLiaPreprocessor
 from streamlit_helpers import (
@@ -58,7 +57,7 @@ import io
 # Page config
 st.set_page_config(
     page_title="Health Sync Monitor | Wood Wide AI",
-    page_icon="static/69600c52653fc6e72def1c7b_Logo white.svg",
+    page_icon="static/favicon.svg",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -484,6 +483,20 @@ def load_isolation_forest_results(subject_id: Union[int, str]) -> Optional[Dict]
     with open(results_file, 'rb') as f:
         results = pickle.load(f)
     return results
+
+
+def _clear_uploaded_data():
+    """Remove persisted uploaded data from disk and clear caches."""
+    for f in [
+        Path("data/processed/subject_uploaded_processed.pkl"),
+        Path("data/embeddings/subject_uploaded_embeddings.npy"),
+        Path("data/embeddings/subject_uploaded_metadata.pkl"),
+    ]:
+        if f.exists():
+            f.unlink()
+    load_subject_data.clear()
+    load_embeddings.clear()
+    st.session_state.uploaded_data = None
 
 
 def generate_sample_csv() -> str:
@@ -1121,6 +1134,8 @@ def main():
         st.session_state.uploaded_data = None
     if 'run_detection' not in st.session_state:
         st.session_state.run_detection = False
+    if 'embeddings_cache' not in st.session_state:
+        st.session_state.embeddings_cache = {}
 
     # Sidebar
     with st.sidebar:
@@ -1183,72 +1198,96 @@ def main():
             )
 
             if uploaded_file is None:
-                st.info("""
-                **Required CSV format:**
-                - `ppg` - PPG signal
-                - `accX`, `accY`, `accZ` - Accelerometer
-                - `label` - Activity label
-                - (Optional) `timestamp_acc`
-
-                Download the sample CSV above to see the format!
-                """)
-                return
-
-            # Parse uploaded file
-            with st.spinner("Parsing CSV file..."):
-                parsed_data = parse_uploaded_csv(uploaded_file)
-
-            if parsed_data is None:
-                st.error("[ERROR] Failed to parse CSV file. Check format.")
-                return
-
-            st.success(f"[SUCCESS] Loaded {len(parsed_data['ppg'])} PPG samples")
-
-            # Preprocessing parameters
-            st.subheader("🔧 Preprocessing")
-
-            window_seconds = st.slider(
-                "Window Length (seconds)",
-                min_value=10,
-                max_value=60,
-                value=30,
-                step=5
-            )
-
-            stride_seconds = st.slider(
-                "Stride (seconds)",
-                min_value=1,
-                max_value=30,
-                value=5,
-                step=1
-            )
-
-            # Run preprocessing button
-            if st.button("Preprocess Data", type="primary", use_container_width=True):
-                with st.spinner("Preprocessing data..."):
-                    data = preprocess_uploaded_data(
-                        parsed_data,
-                        window_seconds=window_seconds,
-                        stride_seconds=stride_seconds
+                # Try to recover previously saved uploaded data from disk
+                recovered_data = load_subject_data("uploaded")
+                if recovered_data is not None:
+                    data = recovered_data
+                    st.session_state.uploaded_data = data
+                    st.info(
+                        f"Restored previously uploaded data "
+                        f"({len(data['windows'])} windows). "
+                        f"Upload a new CSV to replace it."
                     )
+                    if st.button(
+                        "Clear Uploaded Data",
+                        help="Remove saved uploaded data and start fresh"
+                    ):
+                        _clear_uploaded_data()
+                        st.rerun()
+                else:
+                    st.info("""
+                    **Required CSV format:**
+                    - `ppg` - PPG signal
+                    - `accX`, `accY`, `accZ` - Accelerometer
+                    - `label` - Activity label
+                    - (Optional) `timestamp_acc`
 
-                if data is None:
-                    st.error("[ERROR] Failed to preprocess data")
+                    Download the sample CSV above to see the format!
+                    """)
+                    return
+            else:
+                # Parse uploaded file
+                with st.spinner("Parsing CSV file..."):
+                    parsed_data = parse_uploaded_csv(uploaded_file)
+
+                if parsed_data is None:
+                    st.error("[ERROR] Failed to parse CSV file. Check format.")
                     return
 
-                st.session_state.uploaded_data = data
-                st.success(f"[SUCCESS] Created {len(data['windows'])} windows")
-                st.rerun()
+                st.success(f"[SUCCESS] Loaded {len(parsed_data['ppg'])} PPG samples")
 
-            # Use preprocessed data from session state
-            if st.session_state.uploaded_data is not None:
-                data = st.session_state.uploaded_data
-                st.info(f"Using {len(data['windows'])} preprocessed windows")
-            else:
-                st.warning("Upload and preprocess data to continue")
-                return
+                # Preprocessing parameters
+                st.subheader("Preprocessing")
 
-            subject_id = "uploaded"  # Placeholder for uploaded data
+                window_seconds = st.slider(
+                    "Window Length (seconds)",
+                    min_value=10,
+                    max_value=60,
+                    value=30,
+                    step=5
+                )
+
+                stride_seconds = st.slider(
+                    "Stride (seconds)",
+                    min_value=1,
+                    max_value=30,
+                    value=5,
+                    step=1
+                )
+
+                # Run preprocessing button
+                if st.button("Preprocess Data", type="primary", use_container_width=True):
+                    with st.spinner("Preprocessing data..."):
+                        data = preprocess_uploaded_data(
+                            parsed_data,
+                            window_seconds=window_seconds,
+                            stride_seconds=stride_seconds
+                        )
+
+                    if data is None:
+                        st.error("[ERROR] Failed to preprocess data")
+                        return
+
+                    # Persist to disk so data survives page reloads
+                    processed_dir = Path("data/processed")
+                    processed_dir.mkdir(parents=True, exist_ok=True)
+                    with open(processed_dir / "subject_uploaded_processed.pkl", 'wb') as f:
+                        pickle.dump({**data, 'subject_id': 'uploaded'}, f)
+                    load_subject_data.clear()
+
+                    st.session_state.uploaded_data = data
+                    st.success(f"[SUCCESS] Created {len(data['windows'])} windows")
+                    st.rerun()
+
+                # Use preprocessed data from session state
+                if st.session_state.uploaded_data is not None:
+                    data = st.session_state.uploaded_data
+                    st.info(f"Using {len(data['windows'])} preprocessed windows")
+                else:
+                    st.warning("Upload and preprocess data to continue")
+                    return
+
+            subject_id = "uploaded"
 
         st.divider()
 
@@ -1277,7 +1316,7 @@ def main():
         # Generate embeddings option
         use_mock = st.checkbox(
             "Use Mock API",
-            value=True,
+            value=False,
             help="Use mock API for embeddings (no API key needed)"
         )
 
@@ -1340,7 +1379,7 @@ def main():
     # Tabs
     tab1, tab2, tab3, tab4 = st.tabs([
         "Overview & Quick Start",
-        "Baseline: Threshold Detection",
+        "Baseline: Classic Approaches",
         "Wood Wide: Embedding Detection",
         "Three-Way Comparison"
     ])
@@ -1420,7 +1459,7 @@ def main():
         - High HR during exercise (normal)
         - High HR during rest (concerning)
 
-        **Result:** 100% false positive rate during exercise
+        **Result:** High false positive rates during exercise
         """)
 
         # Alert fatigue callout
@@ -1451,13 +1490,13 @@ def main():
 
     # Tab 2: Baseline Detection
     with tab2:
-        st.header("Baseline: Threshold Detection")
-        st.markdown("### Understanding the limitations of threshold-based approaches")
+        st.header("Baseline: Classic Approaches")
+        st.markdown("### Understanding the limitations of threshold and statistical methods")
 
         # Tab description
         st.markdown(f'<div class="tab-description">{SECTION_INTROS["baseline"]}</div>', unsafe_allow_html=True)
 
-        st.subheader("Method: Heart Rate Threshold")
+        st.subheader("Method 1: Heart Rate Threshold")
         st.markdown(f"Alert when Heart Rate > {baseline_threshold} BPM")
 
         # Extract HR
@@ -1607,14 +1646,218 @@ def main():
         df_perf = pd.DataFrame(activity_perf)
         st.dataframe(df_perf, hide_index=True, use_container_width=True)
 
+        # ============================================================
+        # ISOLATION FOREST SECTION
+        # ============================================================
+        st.divider()
+        st.subheader("Method 2: Isolation Forest (Classic ML)")
+
+        st.markdown("""
+        Can a more sophisticated algorithm do better? **Isolation Forest** is a popular
+        anomaly detection method that considers **multiple signals simultaneously**
+        rather than just heart rate alone.
+        """)
+
+        with st.expander("How Isolation Forest Works", expanded=False):
+            st.markdown(ALGORITHM_EXPLANATIONS["isolation_forest_how_it_works"])
+
+        # Run Isolation Forest
+        with st.spinner("Training Isolation Forest on exercise windows..."):
+            iforest_detector = IsolationForestDetector(contamination=0.1)
+            iforest_detector.fit(windows, labels)
+            iforest_result = iforest_detector.predict(windows)
+
+            iforest_metrics = compute_isolation_forest_metrics(
+                if_alerts=iforest_result.alerts,
+                labels=labels
+            )
+            iforest_metrics['alerts'] = iforest_result.alerts
+
+        # Metrics row
+        if_col1, if_col2, if_col3, if_col4 = st.columns(4)
+
+        with if_col1:
+            st.metric(
+                "Total Alerts",
+                iforest_metrics['total_alerts'],
+                delta=f"{iforest_metrics['total_alerts']/len(windows)*100:.1f}%"
+            )
+        with if_col2:
+            st.metric(
+                "Alerts During Exercise",
+                f"{iforest_metrics['alerts_during_exercise']}/{iforest_metrics['exercise_windows']}",
+                delta=f"{iforest_metrics['false_positive_rate_pct']:.1f}% FP rate",
+                delta_color="inverse"
+            )
+        with if_col3:
+            st.metric(
+                "Alerts During Rest",
+                f"{iforest_metrics['alerts_during_rest']}/{iforest_metrics['rest_windows']}"
+            )
+        with if_col4:
+            improvement = baseline_metrics['false_positive_rate_pct'] - iforest_metrics['false_positive_rate_pct']
+            st.metric(
+                "FP Improvement vs Threshold",
+                f"{improvement:.1f}%",
+                delta="better" if improvement > 0 else "worse",
+                delta_color="normal" if improvement > 0 else "inverse"
+            )
+
+        if iforest_metrics['false_positive_rate_pct'] > 10:
+            create_callout(
+                f"**Exercise False Positive Rate: {iforest_metrics['false_positive_rate_pct']:.1f}%**\n\n"
+                f"Better than threshold ({baseline_metrics['false_positive_rate_pct']:.1f}%), "
+                "but still too high for reliable continuous monitoring.",
+                type="warning",
+                title="Improvement, But Not Enough"
+            )
+
         st.divider()
 
-        # Why This Fails
-        st.subheader("Why This Fails")
+        # Visualization: Anomaly Scores + Alert Timeline
+        st.subheader("Isolation Forest Detection Visualization")
+
+        # Negate scores so higher = more anomalous (more intuitive)
+        negated_scores = -iforest_result.anomaly_scores
+        negated_threshold = -iforest_result.threshold
+
+        if_fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=("Anomaly Score Over Time (higher = more unusual)", "Alert Timeline"),
+            vertical_spacing=0.15,
+            row_heights=[0.7, 0.3]
+        )
+
+        # Row 1: Anomaly scores
+        if_fig.add_trace(
+            go.Scatter(
+                x=time_minutes,
+                y=negated_scores,
+                mode='lines',
+                name='Anomaly Score',
+                line=dict(color='#f39c12', width=2),
+                hovertemplate='Score: %{y:.3f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+
+        # Decision threshold line
+        if_fig.add_hline(
+            y=negated_threshold,
+            line_dash="dash",
+            line_color="red",
+            annotation_text=f"Decision Threshold",
+            row=1, col=1
+        )
+
+        # Highlight anomalous points
+        if iforest_result.alerts.any():
+            if_fig.add_trace(
+                go.Scatter(
+                    x=time_minutes[iforest_result.alerts],
+                    y=negated_scores[iforest_result.alerts],
+                    mode='markers',
+                    name='Anomalies',
+                    marker=dict(size=8, color='red', symbol='x', line=dict(width=1.5)),
+                    hovertemplate='Anomaly Score: %{y:.3f}<extra></extra>'
+                ),
+                row=1, col=1
+            )
+
+        # Row 2: Alert timeline
+        if_fig.add_trace(
+            go.Scatter(
+                x=time_minutes,
+                y=iforest_result.alerts.astype(float),
+                mode='lines',
+                name='Alert Active',
+                fill='tozeroy',
+                line=dict(color='#f39c12', width=0),
+                fillcolor='rgba(243, 156, 18, 0.3)'
+            ),
+            row=2, col=1
+        )
+
+        if_fig.update_xaxes(title_text="Time (minutes)", row=2, col=1)
+        if_fig.update_yaxes(title_text="Anomaly Score", row=1, col=1)
+        if_fig.update_yaxes(
+            title_text="Alert", row=2, col=1,
+            tickmode='array', tickvals=[0, 1], ticktext=['No', 'Yes']
+        )
+
+        if_fig.update_layout(height=600, showlegend=True, hovermode='x unified')
+
+        st.plotly_chart(if_fig, use_container_width=True)
+
+        st.divider()
+
+        # Performance by Activity
+        st.subheader("Isolation Forest: Performance by Activity")
+
+        if_activity_perf = []
+        for label, activity in activity_map.items():
+            mask = labels == label
+            if mask.sum() > 0:
+                n_alerts = (iforest_result.alerts & mask).sum()
+                if_activity_perf.append({
+                    'Activity': activity,
+                    'Type': 'Exercise' if label in [2, 3, 4, 5] else 'Rest',
+                    'Windows': int(mask.sum()),
+                    'Alerts': int(n_alerts),
+                    'Alert Rate (%)': n_alerts / mask.sum() * 100
+                })
+
+        df_if_perf = pd.DataFrame(if_activity_perf)
+        st.dataframe(df_if_perf, hide_index=True, use_container_width=True)
+
+        # ============================================================
+        # QUICK COMPARISON & UNIFIED CONCLUSION
+        # ============================================================
+        st.divider()
+        st.subheader("Threshold vs. Isolation Forest")
+
+        comp_col1, comp_col2 = st.columns(2)
+
+        with comp_col1:
+            st.markdown("**Threshold Detection**")
+            st.metric("Exercise FP Rate",
+                      f"{baseline_metrics['false_positive_rate_pct']:.1f}%")
+            st.metric("Total Alerts", baseline_metrics['total_alerts'])
+            st.markdown("*Single signal (HR only), no learning*")
+
+        with comp_col2:
+            st.markdown("**Isolation Forest**")
+            st.metric("Exercise FP Rate",
+                      f"{iforest_metrics['false_positive_rate_pct']:.1f}%")
+            st.metric("Total Alerts", iforest_metrics['total_alerts'])
+            st.markdown("*Multi-signal, hand-crafted features*")
+
+        st.divider()
+
+        # Unified conclusion
+        st.subheader("Why Classic Methods Fail")
+
         create_callout(
             ALGORITHM_EXPLANATIONS["threshold_problem"],
             type="info",
-            title="Key Issue: Context Blindness"
+            title="Issue 1: Context Blindness (Threshold)"
+        )
+
+        create_callout(
+            CONCLUSIONS["iforest_limitations"],
+            type="warning",
+            title="Issue 2: Feature Limitations (Isolation Forest)"
+        )
+
+        create_callout(
+            "**Neither approach captures signal relationships.** "
+            "Threshold detection examines HR in isolation. "
+            "Isolation Forest uses hand-crafted features (mean/std) that cannot encode "
+            "the temporal coupling between heart rate and physical activity. "
+            "To solve this, we need **learned representations** that understand context. "
+            "See the next tab for Wood Wide's embedding-based approach.",
+            type="info",
+            title="The Path Forward: Context-Aware Embeddings"
         )
 
     # Tab 3: Wood Wide Detection
@@ -1676,15 +1919,31 @@ def main():
         embeddings_data = load_embeddings(subject_id)
 
         if embeddings_data is None or force_regenerate:
-            st.warning("Generating embeddings... This may take a moment.")
-
-            with st.spinner("Calling Wood Wide API..."):
+            with st.status("Generating embeddings via Wood Wide API...", expanded=True) as status:
                 try:
+                    # Single placeholder that gets overwritten for poll updates
+                    current_step = st.empty()
+
+                    def on_progress(step, message):
+                        if step == "poll_status":
+                            # Overwrite in place so poll lines don't stack
+                            current_step.markdown(f"`{message}`")
+                        elif step == "poll_done":
+                            current_step.empty()
+                            st.markdown(f"**{message}**")
+                        elif step == "done":
+                            st.markdown(f"**{message}**")
+                        elif step in ("upload_done", "train_done"):
+                            st.caption(message)
+                        else:
+                            st.text(message)
+
                     embeddings, emb_metadata = send_windows_to_woodwide(
                         windows,
                         batch_size=32,
                         embedding_dim=128,
-                        use_mock=use_mock
+                        use_mock=use_mock,
+                        progress_callback=on_progress
                     )
 
                     # Save
@@ -1695,13 +1954,20 @@ def main():
                     with open(embeddings_dir / f"subject_{subject_str}_metadata.pkl", 'wb') as f:
                         pickle.dump(emb_metadata, f)
 
-                    st.success("[SUCCESS] Embeddings generated successfully")
+                    # Invalidate stale cache so load_embeddings() picks up the new files
+                    load_embeddings.clear()
+
+                    status.update(label="Embeddings generated!", state="complete", expanded=False)
                 except Exception as e:
+                    status.update(label="Embedding generation failed", state="error")
                     st.error(f"[ERROR] Failed to generate embeddings: {e}")
                     return
         else:
             embeddings, emb_metadata = embeddings_data
             st.success("[SUCCESS] Loaded cached embeddings")
+
+        # Store in session state so Tab 4 can access without cache issues
+        st.session_state.embeddings_cache[subject_id] = (embeddings, emb_metadata)
 
         # Fit detector
         with st.spinner("Fitting Wood Wide detector..."):
@@ -1838,16 +2104,16 @@ def main():
 
         st.plotly_chart(hr_acc_fig, use_container_width=True)
 
-        st.info("""
-        **How to interpret:**
-        - 🔴 **Red line**: Heart rate (left axis)
-        - 🔵 **Blue line**: Accelerometer magnitude (right axis)
-        - 🟥 **Red shading**: Wood Wide detected anomaly (signals decoupled)
-
-        **Normal:** High HR + High ACC = No shading (exercise is normal)
-
-        **Anomaly:** High HR + Low ACC = Red shading (potential health concern)
-        """)
+        st.markdown("""
+        <div class="info-callout">
+        <strong>How to interpret</strong><br><br>
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#e74c3c;margin-right:6px;vertical-align:middle;"></span> <strong>Red line</strong> &mdash; Heart rate (left axis)<br>
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#3498db;margin-right:6px;vertical-align:middle;"></span> <strong>Blue line</strong> &mdash; Accelerometer magnitude (right axis)<br>
+        <span style="display:inline-block;width:10px;height:3px;background:#e74c3c;opacity:0.5;margin-right:6px;vertical-align:middle;"></span> <strong>Red shading</strong> &mdash; Wood Wide detected anomaly (signals decoupled)<br><br>
+        <strong>Normal:</strong> High HR + High ACC = No shading (exercise is normal)<br>
+        <strong>Anomaly:</strong> High HR + Low ACC = Red shading (potential health concern)
+        </div>
+        """, unsafe_allow_html=True)
 
         st.divider()
 
@@ -1926,8 +2192,8 @@ def main():
         hr_bpm = extract_heart_rate_simple(windows)
         baseline_alerts = hr_bpm > baseline_threshold
 
-        # Load or generate Wood Wide results
-        embeddings_data = load_embeddings(subject_id)
+        # Load Wood Wide results (session state first, then disk cache)
+        embeddings_data = st.session_state.embeddings_cache.get(subject_id) or load_embeddings(subject_id)
         if embeddings_data is None:
             st.warning("Please generate embeddings in the Wood Wide tab first.")
             return
@@ -1962,7 +2228,7 @@ def main():
         }
 
         # Three-way comparison chart
-        st.subheader("📊 Performance Comparison")
+        st.subheader("Performance Comparison")
 
         three_way_fig = create_three_way_comparison_chart(
             baseline_fp_rate=baseline_metrics['false_positive_rate_pct'],
@@ -2026,7 +2292,7 @@ def main():
         st.divider()
 
         # Signal Relationship Visualization
-        st.subheader("📊 Signal Relationship Analysis")
+        st.subheader("Signal Relationship Analysis")
 
         st.markdown("""
         This dual-axis chart reveals **why Wood Wide succeeds where threshold detection fails**.
@@ -2049,8 +2315,8 @@ def main():
 
         with col1:
             st.markdown("""
-            <div class="alert-box success-box">
-            <strong>✅ Normal Pattern</strong><br>
+            <div class="success-callout">
+            <strong>Normal Pattern</strong><br>
             High HR + High ACC = No anomaly<br>
             <em>Example: Exercising (cycling, walking)</em><br>
             Wood Wide understands this is normal.
@@ -2059,8 +2325,8 @@ def main():
 
         with col2:
             st.markdown("""
-            <div class="alert-box danger-box">
-            <strong>⚠️ Anomaly Pattern</strong><br>
+            <div class="warning-callout">
+            <strong>Anomaly Pattern</strong><br>
             High HR + Low ACC = Anomaly (red shading)<br>
             <em>Example: Elevated HR while sitting</em><br>
             Wood Wide detects signal decoupling.
