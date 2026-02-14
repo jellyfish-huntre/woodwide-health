@@ -1,149 +1,74 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## What this project is
 
-## Project Overview
+"Health Sync Monitor" is a technical demo for Wood Wide AI. Shows why simple HR thresholds don't work for health monitoring (too many false alarms during exercise) and how multivariate embeddings fix that.
 
-Health Sync Monitor is a developer-facing technical demo for Woodwide AI that demonstrates how multivariate embeddings solve the "context problem" in wearable health monitoring. Unlike traditional fitness trackers that use simple heart rate thresholds (causing false alarms during exercise), this application uses Wood Wide AI to understand the relationship between heart rate and physical activity, only alerting when signals become "decoupled" (e.g., racing heart during sleep).
+The idea is embedding windows of HR + activity data via the Wood Wide API instead of `if hr > 100: alert()`. The embedding captures context, so high HR during cycling looks different from high HR during sleep.
 
-## Core Architecture
+Built on the PPG-DaLiA dataset (real wearable data from 15 subjects).
 
-The application follows a modular **"data-to-dashboard" pipeline**:
+## How it's structured
 
-1. **Data Ingestion** → High-frequency time-series data (heart rate, activity metrics)
-2. **Embedding Generation** → Transform data into latent representations via Wood Wide API
-3. **Signal Analysis** → Detect decoupling between heart rate and activity context
-4. **Visualization** → Display health states and alerts
-
-### Key Architectural Concept
-
-The core innovation is using **multivariate embeddings** to understand contextual relationships:
-
-- Traditional: `if heart_rate > threshold: alert()`
-- This app: Embeddings learn that high HR during exercise is normal, but high HR during sleep indicates decoupling
-
-## Technology Stack
-
-- **Python**: Core data processing and API integration
-- **Pandas**: Time-series data ingestion and manipulation
-- **NumPy**: Numerical operations on health metrics
-- **Wood Wide API**: Critical component for embedding generation
-- **Streamlit**: Data dashboard and visualization
-- **React**: Additional UI components/interface
-
-## Wood Wide API Integration
-
-The Wood Wide API is the key component that transforms raw health metrics into latent representations.
-
-### APIClient Class
-
-Located in `src/embeddings/api_client.py`, this class handles all API interactions:
-
-- **Authentication:** Reads `WOOD_WIDE_API_KEY` from `.env` file
-- **Batching:** Automatically batches large requests (default: 32 windows per batch)
-- **Retry Logic:** Exponential backoff with configurable max retries
-- **Error Handling:** Custom exceptions for auth, rate limiting, and network errors
-- **MockAPIClient:** Use for testing without real API calls (`--mock` flag)
-
-### API Data Flow
-
-- **Input:** Preprocessed windows of shape `(n_windows, window_length, n_features)`
-- **Output:** Embeddings of shape `(n_windows, embedding_dim)`
-- **Normalization:** Embeddings are unit-normalized (L2 norm = 1)
-- **Rate Limiting:** Client respects `Retry-After` headers automatically
-
-### Cleanup and Caching
-
-- **Cleanup on error:** `generate_embeddings()` automatically deletes uploaded datasets if training or inference fails. Disable with `cleanup_on_error=False`.
-- **Server-side model reuse:** Before training, the client checks `list_models()` for an existing model with the same name and COMPLETE status. If found, training is skipped.
-- **Local disk cache:** Set `cache_dir` on `APIClient` or `MockAPIClient` to cache embeddings to disk. Subsequent calls with the same input data return cached results instantly. Use `force_regenerate=True` to bypass.
-- **Summary feature optimization:** `_extract_summary_features()` uses vectorized NumPy operations for performance while maintaining identical output column order.
-
-See `docs/API_CLIENT_GUIDE.md` for detailed usage examples.
-
-## Development Commands
-
-### Environment Setup
-
-```bash
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
+```
+src/
+  ingestion/     — preprocess raw PPG-DaLiA .pkl files into windowed arrays
+  embeddings/    — Wood Wide API client + embedding generation
+  detectors/     — anomaly detectors (threshold, isolation forest, woodwide centroid)
+app.py           — Streamlit dashboard (main entry point)
+app_content.py   — display text for the dashboard
+app_code_snippets.py — code snippet rendering utilities
+tests/           — pytest suite (run with `pytest`)
 ```
 
-### Running the Application
+## Running it
 
 ```bash
-# Run interactive Streamlit dashboard
+# setup
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# dashboard
 streamlit run app.py
 
-# The dashboard includes:
-# - Dataset overview and activity timeline
-# - Baseline threshold detection (shows the problem)
-# - Wood Wide embedding detection (shows the solution)
-# - Side-by-side comparison (94% improvement in false positive rate)
-
-# Run with specific port
-streamlit run app.py --server.port 8501
-
-# See docs/STREAMLIT_APP_GUIDE.md for detailed usage
-```
-
-### Testing
-
-```bash
-# Run all tests
+# tests
 pytest
-
-# Run specific test file
-pytest tests/test_embeddings.py
-
-# Run with coverage
-pytest --cov=. --cov-report=html
 ```
 
-### Data Pipeline Development
+Use `python3` on this machine, not `python`.
+
+## Working with the Wood Wide API
+
+API client lives in `src/embeddings/api_client.py`. The flow is: upload CSV → train model → poll until done → run inference.
+
+- API key goes in `.env` as `WOOD_WIDE_API_KEY`. Never hardcode it.
+- Base URL is `https://beta.woodwide.ai` (not `api.woodwide.ai`).
+- For local dev/testing, use `MockAPIClient` or pass `--mock` to CLI scripts.
+- The API chokes on >500 CSV columns, so `_extract_summary_features()` computes 36 stats per window before uploading.
+- `InsufficientCreditsError` is raised on HTTP 402 — the Streamlit app handles this with a dialog prompting for a new key.
+
+## Code style
+
+- Keep modules separate: ingestion, embeddings, detection, and visualization don't import each other sideways.
+- Write clear function docstrings. Type hints where they help.
+- Don't hardcode paths or API keys.
+- Prefer editing existing files over creating new ones.
+- When changing the Streamlit app, keep display text in `app_content.py` and layout logic in `app.py`.
+
+## Data pipeline
 
 ```bash
-# Download dataset (or create synthetic data for testing)
-python download_dataset.py
-# OR for quick testing with realistic HR patterns:
-python create_realistic_synthetic_data.py
+# get data
+python3 download_dataset.py           # real PPG-DaLiA data
+python3 create_realistic_synthetic_data.py  # or synthetic for quick testing
 
-# Preprocess single subject
-python -m src.ingestion.preprocess
+# preprocess
+python3 process_all_subjects.py
 
-# Preprocess all subjects
-python process_all_subjects.py
+# generate embeddings
+python3 generate_embeddings.py 1 --mock      # mock API
+python3 generate_embeddings.py 1 --batch-size 32  # real API
 
-# Verify data quality
-python verify_data_quality.py 1
-
-# Run baseline threshold detection (demonstrates the problem)
-python baseline_threshold_detection.py 1 --threshold 100 --save-plot plot.png
-
-# Generate embeddings (using mock API for testing)
-python generate_embeddings.py 1 --mock
-
-# Generate embeddings (using real Wood Wide API)
-python generate_embeddings.py 1 --batch-size 32
-
-# Run Wood Wide detector (embedding-based, solves the problem)
-python woodwide_detection.py 1 --use-mock --compare-baseline 100 --save-plot plot.png
-
-# Visualize preprocessed data
-python visualize_data.py 1 --window 10
+# run detection
+python3 woodwide_detection.py 1 --use-mock --compare-baseline 100
 ```
-
-## Project Structure Notes
-
-- Keep data ingestion, embedding generation, and visualization as separate, composable modules
-- write detailed, clear function specs and keep the codebase easy to understand, ready for change, and safe from bugs
-- do not hardcode API keys; use a .env file
-- use uv or pip for dependency management
-- The pipeline should handle high-frequency data efficiently (expect 1Hz+ sampling rates)
-- API calls to Wood Wide should be batched appropriately to handle time-series data
-- Alert logic lives in the analysis module, separate from embedding generation
