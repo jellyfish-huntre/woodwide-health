@@ -103,5 +103,3 @@ Note: stairs and walking have near-zero false positive rates. Cycling is higher 
 ## Dataset Citation
 
 Reiss, A. (2019). PPG-DaLiA. UCI Machine Learning Repository. https://doi.org/10.24432/C5N312
-
-Reiss, A. (2019). PPG-DaLiA. UCI Machine Learning Repository. https://doi.org/10.24432/C5N312
