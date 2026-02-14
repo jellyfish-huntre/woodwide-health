@@ -59,9 +59,9 @@ from app_content import (
     BATCHING_BEST_PRACTICES,
     DEPLOYMENT_CONSIDERATIONS,
     TUTORIAL_STEPS,
-    CONCLUSIONS,
     FURTHER_READING,
-    CALLOUT_MESSAGES
+    CALLOUT_MESSAGES,
+    FAILURE_CARDS
 )
 import io
 
@@ -407,6 +407,72 @@ st.markdown("""
         border: 1px solid #ef4444;
         color: #f87171;
     }
+
+    /* Why Classic Methods Fail - card grid: equal height */
+    [data-testid="stHorizontalBlock"]:has(.failure-card) { align-items: stretch; }
+    [data-testid="stHorizontalBlock"]:has(.failure-card) > div,
+    [data-testid="stHorizontalBlock"]:has(.failure-card) > div > div,
+    [data-testid="stHorizontalBlock"]:has(.failure-card) > div > div > div,
+    [data-testid="stHorizontalBlock"]:has(.failure-card) > div > div > div > div {
+        display: flex; flex-direction: column; height: 100%;
+    }
+
+    .failure-card {
+        background: #1a1a1a;
+        border: 1px solid #262626;
+        border-top: 4px solid #3b82f6;
+        border-radius: 0.5rem;
+        padding: 1.5rem;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+    }
+
+    .failure-card.card-threshold { border-top-color: #ef4444; }
+    .failure-card.card-iforest  { border-top-color: #EB9D6C; }
+    .failure-card.card-solution  {
+        border-top-color: #22c55e;
+        background: linear-gradient(135deg, #1a221a 0%, #1a1a1a 100%);
+    }
+
+    .failure-card .card-subtitle {
+        font-size: 0.75rem; font-weight: 500;
+        text-transform: uppercase; letter-spacing: 0.08em;
+        color: #8B7E6B; margin-bottom: 0.25rem;
+    }
+
+    .failure-card .card-title {
+        font-size: 1.125rem; font-weight: 600;
+        color: #F3F1E5; margin-bottom: 1rem;
+    }
+
+    .failure-card .card-body {
+        font-size: 0.875rem; color: #c4baa6;
+        line-height: 1.65; flex-grow: 1;
+    }
+
+    .failure-card .card-body code {
+        color: #60a5fa;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.8125rem;
+    }
+
+    .failure-card .card-verdict {
+        font-size: 0.6875rem; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.1em;
+        padding-top: 1rem; margin-top: auto;
+        border-top: 1px solid #262626;
+    }
+
+    .failure-card.card-threshold .card-verdict { color: #ef4444; }
+    .failure-card.card-iforest .card-verdict  { color: #EB9D6C; }
+    .failure-card.card-solution .card-verdict  { color: #22c55e; }
+
+    .failure-card .tab-link {
+        color: inherit; cursor: pointer;
+        text-decoration: none;
+    }
+    .failure-card .tab-link:hover { text-decoration: underline; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1012,12 +1078,27 @@ def create_hr_vs_acceleration_chart(
                 x0=time_minutes[start],
                 x1=time_minutes[end],
                 fillcolor="red",
-                opacity=0.2,
+                opacity=0.35,
                 layer="below",
-                line_width=0,
+                line=dict(width=2, color="rgba(231, 76, 60, 0.6)"),
                 annotation_text="Anomaly" if start == anomaly_starts[0] else None,
                 annotation_position="top left"
             )
+
+        # Add alert bar along top of chart for visibility
+        alert_y = np.full(len(time_minutes), np.nan)
+        alert_y[woodwide_alerts] = hr_bpm.max() * 1.02
+        fig.add_trace(
+            go.Scatter(
+                x=time_minutes,
+                y=alert_y,
+                mode='markers',
+                name='Anomaly Detected',
+                marker=dict(size=8, color='rgba(231, 76, 60, 0.8)', symbol='square'),
+                hoverinfo='skip'
+            ),
+            secondary_y=False
+        )
 
     # Add heart rate trace (primary y-axis)
     fig.add_trace(
@@ -1775,10 +1856,10 @@ def main():
             create_callout(
                 f"**High False Positive Rate: {baseline_metrics['false_positive_rate_pct']:.1f}%**\n\n"
                 f"{baseline_metrics['alerts_during_exercise']} false alarms during exercise.\n\n"
-                "Threshold-based detection produces excessive false alarms during exercise, "
-                "leading to alert fatigue. Users disable monitoring systems with FP rates >50%.",
+                "For complex datasets, threshold-based detection often have to choose between creating many false positives or missing true anomalies. "
+                "Good numerical reasoning must minimize both to prevent alert fatigue and provide good insights.",
                 type="warning",
-                title="Warning: Unusable for Continuous Monitoring"
+                title=""
             )
 
         st.divider()
@@ -2061,28 +2142,23 @@ def main():
         # Unified conclusion
         st.subheader("Why Classic Methods Fail")
 
-        create_callout(
-            ALGORITHM_EXPLANATIONS["threshold_problem"],
-            type="info",
-            title="Issue 1: Context Blindness (Threshold)"
-        )
+        card_configs = [
+            ("card-threshold", FAILURE_CARDS["threshold"]),
+            ("card-iforest",   FAILURE_CARDS["iforest"]),
+            ("card-solution",  FAILURE_CARDS["solution"]),
+        ]
 
-        create_callout(
-            CONCLUSIONS["iforest_limitations"],
-            type="warning",
-            title="Issue 2: Feature Limitations (Isolation Forest)"
-        )
-
-        create_callout(
-            "**Neither approach captures signal relationships.** "
-            "Threshold detection examines HR in isolation. "
-            "Isolation Forest uses hand-crafted features (mean/std) that cannot encode "
-            "the temporal coupling between heart rate and physical activity. "
-            "To solve this, we need **learned representations** that understand context. "
-            "See the next tab for Wood Wide's embedding-based approach.",
-            type="info",
-            title="The Path Forward: Context-Aware Embeddings"
-        )
+        fail_cols = st.columns(3)
+        for col, (css_class, card) in zip(fail_cols, card_configs):
+            with col:
+                st.markdown(f"""
+                <div class="failure-card {css_class}">
+                    <div class="card-subtitle">{card['subtitle']}</div>
+                    <div class="card-title">{card['title']}</div>
+                    <div class="card-body">{card['body']}</div>
+                    <div class="card-verdict">{card['verdict']}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
     # Tab 3: Wood Wide Detection
     with tab3:
@@ -2242,12 +2318,11 @@ def main():
         # Success message if low FP rate
         if result.metrics['false_positive_rate_pct'] < 20:
             create_callout(
-                f"False positive rate: {result.metrics['false_positive_rate_pct']:.1f}%\n\n"
                 f"Only {result.metrics['alerts_during_exercise']} false alarms during exercise.\n\n"
                 "Wood Wide successfully distinguishes between normal exercise patterns and genuine "
                 "anomalies by understanding signal relationships in embedding space.",
                 type="success",
-                title="Context-Aware Detection Achieved"
+                title=f"False positive rate: {result.metrics['false_positive_rate_pct']:.1f}%\n"
             )
 
         st.divider()
@@ -2323,11 +2398,6 @@ def main():
         # Heart Rate vs Accelerometer with Anomaly Shading
         st.subheader("Heart Rate vs. Physical Activity")
 
-        st.markdown("""
-        This chart shows the relationship between heart rate and accelerometer magnitude.
-        **Red shaded areas** indicate Wood Wide-detected anomalies where the signals are decoupled.
-        """)
-
         # Extract HR for this view
         hr_for_chart = extract_heart_rate_simple(windows)
 
@@ -2344,12 +2414,11 @@ def main():
 
         st.markdown("""
         <div class="info-callout">
-        <strong>How to interpret</strong><br><br>
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#e74c3c;margin-right:6px;vertical-align:middle;"></span> <strong>Red line</strong> &mdash; Heart rate (left axis)<br>
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#3498db;margin-right:6px;vertical-align:middle;"></span> <strong>Blue line</strong> &mdash; Accelerometer magnitude (right axis)<br>
-        <span style="display:inline-block;width:10px;height:3px;background:#e74c3c;opacity:0.5;margin-right:6px;vertical-align:middle;"></span> <strong>Red shading</strong> &mdash; Wood Wide detected anomaly (signals decoupled)<br><br>
-        <strong>Normal:</strong> High HR + High ACC = No shading (exercise is normal)<br>
-        <strong>Anomaly:</strong> High HR + Low ACC = Red shading (potential health concern)
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#e74c3c;margin-right:6px;vertical-align:middle;"></span> <strong>Red line</strong> &mdash; Heart rate<br>
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:#3498db;margin-right:6px;vertical-align:middle;"></span> <strong>Blue line</strong> &mdash; Accelerometer magnitude<br>
+        <span style="display:inline-block;width:10px;height:10px;background:rgba(231,76,60,0.8);margin-right:6px;vertical-align:middle;"></span> <strong>Red squares (top)</strong> &mdash; Wood Wide detected anomaly (signals decoupled)<br><br>
+        <strong>Normal:</strong> High HR + High ACC = No markers<br>
+        <strong>Anomaly:</strong> High HR + Low ACC = Red markers
         </div>
         """, unsafe_allow_html=True)
 
@@ -2442,7 +2511,7 @@ def main():
         <span style="color:#e74c3c;font-weight:bold;">X</span> = detected anomalies<br><br>
         Activities that cluster together have similar embedding signatures. Exercise activities
         should form tight groups, while anomalous windows (red X) appear far from the exercise
-        cluster — this is exactly how the centroid-based detector identifies them.
+        cluster.
         </div>
         """, unsafe_allow_html=True)
 
@@ -2468,7 +2537,6 @@ def main():
     # Tab 4: Three-Way Comparison
     with tab4:
         st.header("Three-Way Performance Comparison")
-        st.markdown("### Comparing Threshold, Isolation Forest, and Wood Wide Detection")
 
         # Evaluation Methodology
         st.subheader("Evaluation Methodology")
@@ -2476,13 +2544,6 @@ def main():
         is_exercise = np.isin(labels, [2, 3, 4, 7])
 
         st.markdown(f"""
-        **Detection Methods:**
-        1. **Baseline Threshold**: Simple heart rate threshold (HR > {baseline_threshold} BPM)
-        2. **Isolation Forest**: Traditional anomaly detection on hand-crafted features
-        3. **Wood Wide (Original)**: Single exercise centroid, single threshold
-        4. **Wood Wide (Dual Threshold)**: Single centroid, separate thresholds for exercise vs rest
-        5. **Wood Wide (Multi-Centroid)**: Per-activity centroids with activity-specific thresholds
-
         **Evaluation Metrics:**
         - **Exercise FP Rate:** Alerts during exercise (should be low)
         - **Rest Detection Rate:** Alerts during rest (higher = more sensitive, but includes false rest alerts)
@@ -2584,32 +2645,7 @@ def main():
 
         st.divider()
 
-        # Detailed comparison table
-        st.subheader("Detailed Metrics")
-
-        table_names = ['Baseline', 'Isolation Forest', 'WW Original', 'WW Dual-Thresh', 'WW Multi-Centroid']
-        table_metrics = [baseline_metrics, iforest_metrics, original_result.metrics, dual_result.metrics, multi_result.metrics]
-        comparison_table = create_extended_comparison_table(table_names, table_metrics)
-        st.dataframe(comparison_table, hide_index=True, use_container_width=True)
-
-        # Key insights
-        original_fp = original_result.metrics['false_positive_rate_pct']
-        dual_fp = dual_result.metrics['false_positive_rate_pct']
-        multi_fp = multi_result.metrics['false_positive_rate_pct']
-        create_callout(
-            f"**Original Single Centroid:** {original_fp:.1f}% exercise FP\n\n"
-            f"**Dual Threshold (99th %ile rest):** {dual_fp:.1f}% exercise FP\n\n"
-            f"**Multi-Centroid:** {multi_fp:.1f}% exercise FP\n\n"
-            "All Wood Wide approaches maintain low exercise false positive rates. "
-            "Dual-threshold and multi-centroid detectors use context-aware thresholds "
-            "for more precise anomaly detection across different activity types.",
-            type="info",
-            title="Exercise False Positive Comparison"
-        )
-
-        st.divider()
-
-        # Three-way timeline
+                # Three-way timeline
         st.subheader("Detection Timeline Comparison")
 
         timeline_fig = create_three_way_timeline(
@@ -2621,57 +2657,23 @@ def main():
         )
         st.plotly_chart(timeline_fig, use_container_width=True)
 
-        st.markdown("""
-        **How to interpret:**
-        - **Top panel**: Heart rate over time
-        - **Bottom panels**: Alert timelines for each method (red = alert triggered)
-        - Notice how Baseline and Isolation Forest trigger many alerts during exercise periods
-        - Wood Wide maintains low false positives while still detecting genuine anomalies
-        """)
-
         st.divider()
 
-        # Signal Relationship Visualization
-        st.subheader("Signal Relationship Analysis")
+ # Detailed comparison table
+        st.subheader("Detailed Metrics")
 
-        st.markdown("""
-        This dual-axis chart reveals **why Wood Wide succeeds where threshold detection fails**.
-        Watch how the red anomaly regions correspond to signal decoupling.
-        """)
+        table_names = ['Baseline', 'Isolation Forest', 'WW Original', 'WW Dual-Thresh', 'WW Multi-Centroid']
+        table_metrics = [baseline_metrics, iforest_metrics, original_result.metrics, dual_result.metrics, multi_result.metrics]
+        comparison_table = create_extended_comparison_table(table_names, table_metrics)
+        st.dataframe(comparison_table, hide_index=True, use_container_width=True)
 
-        # Create HR vs ACC chart with anomalies
-        hr_acc_comparison = create_hr_vs_acceleration_chart(
-            windows=windows,
-            timestamps=timestamps,
-            hr_bpm=hr_bpm,
-            woodwide_alerts=result.alerts,
-            title="The Context Problem Visualized: Heart Rate vs. Activity"
+        # Key insights
+        create_callout(
+            "Dual-threshold and multi-centroid detectors use context-aware thresholds "
+            "for more precise anomaly detection across different activity types.",
+            type="info",
+            title=""
         )
-
-        st.plotly_chart(hr_acc_comparison, use_container_width=True)
-
-        # Interpretation guide
-        col1, col2 = st.columns(2)
-
-        with col1:
-            st.markdown("""
-            <div class="success-callout">
-            <strong>Normal Pattern</strong><br>
-            High HR + High ACC = No anomaly<br>
-            <em>Example: Exercising (cycling, walking)</em><br>
-            Wood Wide understands this is normal.
-            </div>
-            """, unsafe_allow_html=True)
-
-        with col2:
-            st.markdown("""
-            <div class="warning-callout">
-            <strong>Anomaly Pattern</strong><br>
-            High HR + Low ACC = Anomaly (red shading)<br>
-            <em>Example: Elevated HR while sitting</em><br>
-            Wood Wide detects signal decoupling.
-            </div>
-            """, unsafe_allow_html=True)
 
         st.divider()
 
@@ -2683,69 +2685,7 @@ def main():
         )
 
         st.divider()
-
-        # Conclusion
-        st.subheader("Conclusion")
-
-        col1, col2, col3 = st.columns(3)
-
-        with col1:
-            st.markdown("### Threshold Detection")
-            st.markdown("""**Limitations:**
-1. **Context-blind**: Examines HR in isolation
-2. **High false positive rate**: 80-100% during exercise
-3. **Unusable for continuous monitoring**: Alert fatigue
-4. **No learning**: Cannot adapt to patterns""")
-
-        with col2:
-            st.markdown("### Isolation Forest")
-            st.markdown("""**Moderate Performance:**
-1. **Hand-crafted features**: Requires domain expertise
-2. **Improved over threshold**: Better than baseline
-3. **Still context-limited**: Features don't capture relationships
-4. **Configuration-sensitive**: Contamination parameter critical""")
-
-        with col3:
-            st.markdown("### Wood Wide (Best)")
-            st.markdown("""**Advantages:**
-1. **Context-aware**: Understands HR-activity relationship
-2. **Low false positive rate**: <10% during exercise
-3. **Practical for deployment**: Manageable alert rate
-4. **Embedding-based**: Learns relationships automatically""")
-
-        st.markdown("### Enhanced Wood Wide Approaches")
-
-        col4, col5 = st.columns(2)
-
-        with col4:
-            st.markdown("#### Dual Threshold")
-            st.markdown("""**Improves rest alert precision:**
-1. **Context-dependent thresholds**: Conservative for exercise, strict for rest
-2. **Reduces false rest alerts**: 99th percentile for rest filters noise
-3. **Same centroid**: Preserves exercise FP performance""")
-
-        with col5:
-            st.markdown("#### Multi-Centroid")
-            st.markdown("""**Per-activity normal patterns:**
-1. **Activity-specific centroids**: Each activity has its own "normal"
-2. **Best precision**: Only flags within-activity outliers
-3. **Requires labels**: Activity type needed at inference time""")
-
-        st.markdown("""
-        ### The Context Problem: Solved
-
-        Multivariate embeddings enable context-aware detection by encoding signal relationships in latent space.
-        This fundamental capability cannot be achieved with threshold-based methods **or** hand-crafted features,
-        regardless of optimization.
-
-        **Wood Wide doesn't just set a better threshold or engineer better features—it solves a fundamentally
-        different problem by understanding how signals relate to each other in a learned representation space.**
-
-        The dual-threshold and multi-centroid approaches further refine this by improving rest alert precision,
-        ensuring that alerts during rest periods represent genuinely anomalous patterns rather than simply
-        "different from exercise."
-        """)
-
+            
         # Further Reading
         st.subheader("Further Reading")
         st.markdown(FURTHER_READING["documentation"])

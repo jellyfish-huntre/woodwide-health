@@ -6,7 +6,7 @@ Contains professionally-written content for the Health Sync Monitor dashboard.
 
 # Section introductions for each tab
 SECTION_INTROS = {
-    "overview": """**What you'll learn:**
+    "overview": """**Overview:**
 - How Wood Wide embeddings solve the context problem in health monitoring
 - The limitations of threshold-based detection
 - Production-ready implementation patterns
@@ -39,40 +39,38 @@ ALGORITHM_EXPLANATIONS = {
 - **Scenario A:** HR=120 BPM during cycling → Normal
 - **Scenario B:** HR=120 BPM during sleep → Concerning
 
-Both scenarios trigger identical alerts, resulting in 80-100% false positive rates
+Both scenarios trigger identical alerts, resulting in high false positive rates
 during exercise periods.""",
 
     "woodwide_how_it_works": """### Training Phase
 
-The detector learns what "normal activity" looks like by computing a centroid:
+Fit a centroid on exercise windows to define "normal":
 
 ```python
-# Pseudocode
-exercise_embeddings = embeddings[is_exercise]
-normal_centroid = mean(exercise_embeddings)
-distances = ||exercise_embeddings - normal_centroid||_2
-threshold = percentile(distances, 95)
+# Simplified NumPy analogy — the actual detector
+# (src/detectors/woodwide.py) adds dual thresholds,
+# multi-centroid support, and validation.
+import numpy as np
+
+exercise_embeddings = embeddings[exercise_mask]
+centroid = exercise_embeddings.mean(axis=0)
+distances = np.linalg.norm(exercise_embeddings - centroid, axis=1)
+threshold = np.percentile(distances, 95)
 ```
 
 ### Detection Phase
 
-For each new window, compute distance from the normal centroid:
+Flag any window whose embedding is far from the centroid:
 
 ```python
-# Pseudocode
-for window_embedding in test_embeddings:
-    distance = ||window_embedding - normal_centroid||_2
-    if distance > threshold:
-        alert = True  # Decoupling detected
+distances = np.linalg.norm(test_embeddings - centroid, axis=1)
+alerts = distances > threshold
 ```
 
 ### Why This Works
 
-Embeddings encode contextual relationships between signals:
-- **High HR + High activity** → Embedding near normal centroid → No alert
-- **High HR + Low activity** → Embedding far from centroid → Alert
-
-This is fundamentally different from threshold methods that examine signals independently.""",
+- **High HR + High activity** → near centroid → no alert
+- **High HR + Low activity** → far from centroid → alert""",
 
     "isolation_forest_how_it_works": """### How Isolation Forest Works
 
@@ -144,11 +142,11 @@ DEPLOYMENT_CONSIDERATIONS = """**Performance characteristics:**
 TUTORIAL_STEPS = {
     "step1_auth": """The first step is authenticating with the Wood Wide API. The client reads your API key from the environment and sets up secure HTTPS connections with automatic retry logic.""",
 
-    "step2_embed": """This step transforms your time-series windows into dense vector embeddings. The API processes windows in batches for efficiency and returns unit-normalized embeddings.""",
+    "step2_embed": """Transform your time-series windows into dense vector embeddings. The API processes windows in batches for efficiency and returns unit-normalized embeddings.""",
 
     "step3_fit": """During the fitting phase, the detector learns what "normal" activity looks like by computing a centroid from exercise embeddings. This centroid represents the expected relationship between heart rate and physical activity.""",
 
-    "step4_predict": """The prediction phase computes the Euclidean distance between each window's embedding and the normal centroid. Large distances indicate signal decoupling (e.g., high HR without high activity)."""
+    "step4_predict": """Wood Wide AI computes the Euclidean distance between each window's embedding and the normal centroid. Large distances indicate signal decoupling (e.g., high HR without high activity)."""
 }
 
 # Conclusion and key takeaways
@@ -208,11 +206,43 @@ FURTHER_READING = {
 
 # Callout messages for different scenarios
 CALLOUT_MESSAGES = {
-    "alert_fatigue": """Traditional threshold methods produce false positive rates of 80-100% during exercise, leading to alert fatigue that causes users to disable monitoring systems entirely.""",
+    "alert_fatigue": """Traditional threshold methods produce high false positive rates during exercise, leading to alert fatigue that causes users to disable monitoring systems entirely.""",
 
     "context_awareness": """Wood Wide successfully distinguishes between normal exercise patterns and genuine anomalies by understanding signal relationships in embedding space.""",
 
     "production_ready": """This implementation is production-ready with proper error handling, rate limiting, retry logic, and performance optimization.""",
 
     "significant_improvement": """Wood Wide achieves a dramatic reduction in false positive rate compared to threshold detection. This improvement makes the system practical for continuous monitoring applications."""
+}
+
+FAILURE_CARDS = {
+    "threshold": {
+        "subtitle": "Threshold",
+        "title": "No context",
+        "body": (
+            '<code>HR=120</code> cycling &rarr; normal<br>'
+            '<code>HR=120</code> sleeping &rarr; problem<br><br>'
+            'Same number, same alert.'
+        ),
+        "verdict": "High false positive rate",
+    },
+    "iforest": {
+        "subtitle": "Isolation Forest",
+        "title": "Limited features",
+        "body": (
+            'Uses mean/std per window. Better than a threshold, '
+            'but still can\'t tell <i>why</i> HR is elevated.'
+        ),
+        "verdict": "Moderate improvement",
+    },
+    "solution": {
+        "subtitle": "Wood Wide",
+        "title": "Learned context",
+        "body": (
+            'Embeddings capture how signals move together.<br><br>'
+            'High HR + active &rarr; normal<br>'
+            'High HR + resting &rarr; alert'
+        ),
+        "verdict": '<a class="tab-link" onclick="document.querySelectorAll(\'[data-baseweb=tab]\')[2].click()">See next tab &rarr;</a>',
+    },
 }
