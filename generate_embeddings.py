@@ -110,7 +110,6 @@ def main():
     console.print()
 
     try:
-        # Load preprocessed data
         console.print("  Loading data...")
         data = load_processed_data(args.subject_id, args.data_dir)
 
@@ -126,7 +125,6 @@ def main():
             f"{metadata['window_seconds']}s per window)"
         )
 
-        # Initialize API client
         if args.mock:
             console.print("  [yellow]![/yellow] Using MOCK API client")
             client = MockAPIClient(embedding_dim=args.embedding_dim or 128)
@@ -135,7 +133,6 @@ def main():
             client = APIClient()
             console.print(f"  [green]>[/green] Connected to {client.base_url}")
 
-        # Check API health
         health = client.check_health()
         console.print(f"  [green]>[/green] API status: {health.get('status', 'unknown')}")
         console.print()
@@ -171,7 +168,6 @@ def main():
         )
         console.print()
 
-        # Save embeddings
         console.print("  Saving results...")
         output_file = save_embeddings(embeddings, args.subject_id, args.output_dir)
 

@@ -94,7 +94,6 @@ def get_or_generate_embeddings(
         use_mock=use_mock
     )
 
-    # Save for future use
     embeddings_dir.mkdir(parents=True, exist_ok=True)
     np.save(embeddings_file, embeddings)
     with open(metadata_file, 'wb') as f:
@@ -129,11 +128,9 @@ def analyze_performance_by_activity(
         if n_windows == 0:
             continue
 
-        # Count alerts during this activity
         alerts_during_activity = (result.alerts & activity_mask).sum()
         alert_rate = alerts_during_activity / n_windows * 100
 
-        # Compute mean distance for this activity
         mean_distance = result.distances[activity_mask].mean()
         max_distance = result.distances[activity_mask].max()
 
@@ -254,13 +251,11 @@ def compare_with_baseline(
         print(f"   python baseline_threshold_detection.py {subject_id} --threshold {baseline_threshold}")
         return
 
-    # Load baseline results
     with open(baseline_file, 'rb') as f:
         baseline_results = pickle.load(f)
 
     baseline_metrics = baseline_results['metrics']
 
-    # Create comparison table
     print("\n" + "=" * 80)
     print("PERFORMANCE COMPARISON: Wood Wide vs. Baseline")
     print("=" * 80)
@@ -361,7 +356,6 @@ def main():
     print(f"Using: {'Mock' if args.use_mock else 'Real'} API")
     print()
 
-    # Load preprocessed data
     print("Loading preprocessed data...")
     data = load_preprocessed_data(args.subject_id, args.data_dir)
 
@@ -396,7 +390,6 @@ def main():
     print(f"✓ Embeddings shape: {embeddings.shape}")
     print()
 
-    # Create and fit Wood Wide detector
     print("Fitting Wood Wide detector...")
     detector = WoodWideDetector(threshold_percentile=args.threshold_percentile)
 
@@ -406,7 +399,6 @@ def main():
     print(f"  Distance threshold: {result.threshold:.4f}")
     print()
 
-    # Analyze performance by activity
     print("Detection Performance by Activity:")
     print("-" * 80)
     activity_analysis = analyze_performance_by_activity(result, labels, activity_map)
@@ -449,7 +441,6 @@ def main():
     print("=" * 80)
     print()
 
-    # Save results
     output_dir = Path('data/woodwide_detection')
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -466,7 +457,6 @@ def main():
     print(f"✓ Results saved to {results_file}")
     print()
 
-    # Save detector
     detector_file = output_dir / f'subject_{args.subject_id:02d}_detector.pkl'
     detector.save(detector_file)
     print(f"✓ Detector saved to {detector_file}")

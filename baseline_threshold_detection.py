@@ -128,14 +128,12 @@ def analyze_false_positives(
     results = []
 
     for label, activity in activity_map.items():
-        # Find windows with this activity
         activity_mask = labels == label
         n_windows = activity_mask.sum()
 
         if n_windows == 0:
             continue
 
-        # Count alerts during this activity
         alerts_during_activity = (alerts & activity_mask).sum()
         alert_rate = alerts_during_activity / n_windows * 100
 
@@ -169,11 +167,9 @@ def compute_detection_metrics(
     Returns:
         Dictionary with metrics
     """
-    # Create exercise mask
     is_exercise = np.isin(labels, exercise_labels)
     is_rest = ~is_exercise
 
-    # Count alerts
     total_alerts = alerts.sum()
     alerts_during_exercise = (alerts & is_exercise).sum()
     alerts_during_rest = (alerts & is_rest).sum()
@@ -308,7 +304,6 @@ def main():
     print(f"Threshold: {args.threshold} BPM")
     print()
 
-    # Load data
     print("Loading preprocessed data...")
     data = load_preprocessed_data(args.subject_id, args.data_dir)
 
@@ -335,27 +330,23 @@ def main():
     print(f"  Duration: {(timestamps[-1] - timestamps[0]) / 60:.1f} minutes")
     print()
 
-    # Extract heart rate
     print("Extracting heart rate from PPG signal...")
     hr_bpm = extract_heart_rate(windows)
     print(f"✓ Heart rate range: {hr_bpm.min():.1f} - {hr_bpm.max():.1f} BPM")
     print(f"  Mean: {hr_bpm.mean():.1f} BPM")
     print()
 
-    # Apply threshold detection
     print(f"Applying threshold detection (HR > {args.threshold} BPM)...")
     alerts = apply_threshold_detection(hr_bpm, threshold=args.threshold)
     print(f"✓ Generated {alerts.sum()} alerts")
     print()
 
-    # Analyze false positives
     print("Analyzing detection performance by activity...")
     fp_analysis = analyze_false_positives(alerts, labels, activity_map)
     print()
     print(fp_analysis.to_string(index=False))
     print()
 
-    # Compute overall metrics
     print("Overall Detection Metrics:")
     print("-" * 80)
     metrics = compute_detection_metrics(alerts, labels, exercise_labels)
@@ -390,7 +381,6 @@ def main():
     print("=" * 80)
     print()
 
-    # Save results
     output_dir = Path('data/baseline_detection')
     output_dir.mkdir(parents=True, exist_ok=True)
 

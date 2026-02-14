@@ -23,10 +23,7 @@ from dotenv import load_dotenv
 from urllib3.util.ssl_ import create_urllib3_context
 import logging
 
-# Load environment variables
 load_dotenv()
-
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -123,7 +120,6 @@ class APIClient:
         Raises:
             AuthenticationError: If API key is not provided or found in environment
         """
-        # Get API credentials from environment or parameters
         self.api_key = api_key or os.getenv("WOOD_WIDE_API_KEY")
         self.base_url = base_url or os.getenv(
             "WOOD_WIDE_API_URL",
@@ -234,14 +230,12 @@ class APIClient:
                         timeout=self.timeout
                     )
 
-                # Handle rate limiting
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 60))
                     logger.warning(f"Rate limited. Retrying after {retry_after}s")
                     time.sleep(retry_after)
                     continue
 
-                # Raise for error status codes
                 response.raise_for_status()
 
                 if not expect_json:
@@ -533,7 +527,6 @@ class APIClient:
         dataset_name = dataset_name or f"health_windows_{data_hash}"
         model_name = model_name or f"health_embed_{data_hash}"
 
-        # Check local disk cache
         if self.cache_dir and not force_regenerate:
             cache_file = self.cache_dir / f"embeddings_{cache_key}.npz"
             if cache_file.exists():
@@ -543,7 +536,6 @@ class APIClient:
                 _notify("done", f"Loaded cached embeddings shape: {embeddings.shape}")
                 return embeddings
 
-        # Step 1: Extract features & convert to CSV
         flat_cols = windows.shape[1] * windows.shape[2] if windows.ndim == 3 else windows.shape[1]
         if flat_cols > self.MAX_FLAT_COLS:
             _notify("csv", f"Extracting summary features from {n_windows} windows ({flat_cols} cols → compact)...")
@@ -553,14 +545,12 @@ class APIClient:
             _notify("csv", f"Converting {n_windows} windows to CSV format...")
             csv_bytes = self._windows_to_csv_bytes(windows)
 
-        # Step 2: Upload dataset
         _notify("upload", f"Uploading dataset '{dataset_name}'...")
         dataset_info = self._upload_dataset(csv_bytes, dataset_name)
         dataset_id = dataset_info["id"]
         _notify("upload_done", f"Dataset uploaded: id={dataset_id}")
 
         try:
-            # Step 2.5: Check for existing model (server-side reuse)
             model_id = None
             try:
                 existing_models = self.list_models()
@@ -574,21 +564,17 @@ class APIClient:
                 logger.debug(f"Could not check for existing models: {e}")
 
             if model_id is None:
-                # Step 3: Train model (no existing model found)
                 _notify("train", f"Starting model training '{model_name}'...")
                 train_response = self._train_model(dataset_name, model_name)
                 model_id = train_response["id"]
                 _notify("train_done", f"Training started: model_id={model_id}")
 
-                # Step 4: Poll until complete
                 _notify("poll", "Waiting for training to complete...")
                 self._poll_model_status(model_id, progress_callback=progress_callback)
 
-            # Step 5: Run inference
             _notify("infer", "Running inference...")
             infer_response = self._infer(model_id, dataset_id)
 
-            # Step 6: Parse response into numpy array
             # Response format: {"embeddings": {"0": [vec], "1": [vec], ...}}
             embeddings_dict = infer_response.get("embeddings", infer_response)
             embeddings_list = []
@@ -600,7 +586,6 @@ class APIClient:
 
             embeddings = np.array(embeddings_list, dtype=np.float32)
 
-            # Save to local disk cache
             if self.cache_dir:
                 cache_file = self.cache_dir / f"embeddings_{cache_key}.npz"
                 np.savez_compressed(cache_file, embeddings=embeddings)

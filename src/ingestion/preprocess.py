@@ -61,7 +61,6 @@ class PPGDaLiaPreprocessor:
         if not subject_file.exists():
             raise FileNotFoundError(f"Subject file not found: {subject_file}")
 
-        # Load pickle file
         with open(subject_file, 'rb') as f:
             data = pickle.load(f, encoding='latin1')
 
@@ -185,7 +184,6 @@ class PPGDaLiaPreprocessor:
             labels_df['activity'].values
         ).astype(int)
 
-        # Create synchronized dataframe
         synchronized = pd.DataFrame({
             'timestamp': common_timeline,
             'ppg': ppg_resampled,
@@ -252,12 +250,10 @@ class PPGDaLiaPreprocessor:
         window_length = int(window_seconds * self.TARGET_RATE)
         stride_length = int(stride_seconds * self.TARGET_RATE)
 
-        # Extract feature matrix
         feature_matrix = df[features].values
         timestamps = df['timestamp'].values
         labels = df['activity'].values
 
-        # Create windows
         windows = []
         window_timestamps = []
         window_labels = []
@@ -265,7 +261,6 @@ class PPGDaLiaPreprocessor:
         for start_idx in range(0, len(feature_matrix) - window_length + 1, stride_length):
             end_idx = start_idx + window_length
 
-            # Extract window
             window = feature_matrix[start_idx:end_idx, :]
 
             # Center timestamp
@@ -311,19 +306,10 @@ class PPGDaLiaPreprocessor:
         """
         print(f"Processing subject {subject_id}...")
 
-        # Load data
         raw_data = self.load_subject_data(subject_id)
-
-        # Extract signals
         ppg_df, acc_df, labels_df = self.extract_signals(raw_data)
-
-        # Synchronize
         synchronized = self.synchronize_signals(ppg_df, acc_df, labels_df)
-
-        # Compute derived features
         enriched = self.compute_derived_features(synchronized)
-
-        # Create windows
         windows, timestamps, labels = self.create_rolling_windows(
             enriched,
             window_seconds=window_seconds,
@@ -379,7 +365,6 @@ def main():
             stride_seconds=5.0
         )
 
-        # Save
         preprocessor.save_processed_data(processed)
 
         # Display info

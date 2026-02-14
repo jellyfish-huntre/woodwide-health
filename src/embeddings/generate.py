@@ -68,7 +68,6 @@ def send_windows_to_woodwide(
     """
     start_time = time.time()
 
-    # Step 1: Validate input
     if validate_input:
         logger.info("Validating input data...")
         _validate_windows(windows)
@@ -78,7 +77,6 @@ def send_windows_to_woodwide(
     logger.info(f"Window shape: ({window_length}, {n_features})")
     logger.info(f"Batch size: {batch_size}")
 
-    # Step 2: Initialize API client
     if use_mock:
         logger.warning("Using MOCK API client - no real API calls will be made")
         client = MockAPIClient(embedding_dim=embedding_dim or 128)
@@ -87,12 +85,10 @@ def send_windows_to_woodwide(
         client = APIClient(api_key=api_key)
 
     try:
-        # Step 3: Check API health
         logger.info("Checking API health...")
         health = client.check_health()
         logger.info(f"API status: {health.get('status', 'unknown')}")
 
-        # Step 4: Generate embeddings
         logger.info("Generating embeddings...")
         embeddings = client.generate_embeddings(
             windows,
@@ -101,11 +97,9 @@ def send_windows_to_woodwide(
             progress_callback=progress_callback
         )
 
-        # Step 5: Validate output
         logger.info("Validating embeddings...")
         _validate_embeddings(embeddings, n_windows)
 
-        # Step 6: Compute metadata
         elapsed_time = time.time() - start_time
         metadata = {
             'n_windows': n_windows,
@@ -125,12 +119,8 @@ def send_windows_to_woodwide(
 
         return embeddings, metadata
 
-    except WoodWideAPIError as e:
-        logger.error(f"API error during embedding generation: {e}")
-        raise
-
     except Exception as e:
-        logger.error(f"Unexpected error during embedding generation: {e}")
+        logger.error(f"Embedding generation failed: {e}")
         raise
 
     finally:
@@ -138,16 +128,7 @@ def send_windows_to_woodwide(
 
 
 def _validate_windows(windows: np.ndarray) -> None:
-    """
-    Validate windowed data format and ranges.
-
-    Args:
-        windows: Array to validate
-
-    Raises:
-        ValueError: If validation fails
-    """
-    # Check dimensionality
+    """Validate windowed data format and ranges."""
     if windows.ndim != 3:
         raise ValueError(
             f"Windows must be 3D array (n_windows, window_length, n_features), "
@@ -156,23 +137,19 @@ def _validate_windows(windows: np.ndarray) -> None:
 
     n_windows, window_length, n_features = windows.shape
 
-    # Check minimum windows
     if n_windows == 0:
         raise ValueError("No windows to process (n_windows = 0)")
 
-    # Check expected features
     if n_features != 5:
         logger.warning(
             f"Expected 5 features (PPG, ACC_X, ACC_Y, ACC_Z, ACC_MAG), "
             f"got {n_features}. Proceeding anyway."
         )
 
-    # Check for null values
     if np.isnan(windows).any():
         n_nulls = np.isnan(windows).sum()
         raise ValueError(f"Found {n_nulls} null/NaN values in windows")
 
-    # Check for infinite values
     if np.isinf(windows).any():
         n_infs = np.isinf(windows).sum()
         raise ValueError(f"Found {n_infs} infinite values in windows")
@@ -194,17 +171,7 @@ def _validate_windows(windows: np.ndarray) -> None:
 
 
 def _validate_embeddings(embeddings: np.ndarray, expected_n_windows: int) -> None:
-    """
-    Validate embedding output.
-
-    Args:
-        embeddings: Generated embeddings
-        expected_n_windows: Expected number of windows
-
-    Raises:
-        ValueError: If validation fails
-    """
-    # Check shape
+    """Validate embedding output shape, count, and values."""
     if embeddings.ndim != 2:
         raise ValueError(
             f"Embeddings must be 2D array (n_windows, embedding_dim), "
@@ -213,13 +180,11 @@ def _validate_embeddings(embeddings: np.ndarray, expected_n_windows: int) -> Non
 
     n_embeddings, embedding_dim = embeddings.shape
 
-    # Check count
     if n_embeddings != expected_n_windows:
         raise ValueError(
             f"Expected {expected_n_windows} embeddings, got {n_embeddings}"
         )
 
-    # Check for null values
     if np.isnan(embeddings).any():
         n_nulls = np.isnan(embeddings).sum()
         raise ValueError(f"Found {n_nulls} null/NaN values in embeddings")
@@ -263,7 +228,6 @@ def process_subject_windows(
         ...     use_mock=True
         ... )
     """
-    # Load preprocessed data
     logger.info(f"Loading subject {subject_id}...")
     input_file = Path(data_dir) / f"subject_{subject_id:02d}_processed.pkl"
 
@@ -283,19 +247,15 @@ def process_subject_windows(
 
     logger.info(f"✓ Loaded {len(windows)} windows")
 
-    # Generate embeddings
     embeddings, gen_metadata = send_windows_to_woodwide(windows, **kwargs)
 
-    # Save results
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Save embeddings as numpy array
     embeddings_file = output_path / f"subject_{subject_id:02d}_embeddings.npy"
     np.save(embeddings_file, embeddings)
     logger.info(f"✓ Saved embeddings: {embeddings_file}")
 
-    # Save metadata
     metadata_file = output_path / f"subject_{subject_id:02d}_metadata.pkl"
     full_metadata = {
         'subject_id': subject_id,
@@ -341,9 +301,7 @@ def batch_process_subjects(
 
     for subject_id in subject_ids:
         try:
-            logger.info(f"\n{'='*70}")
-            logger.info(f"Processing Subject {subject_id}")
-            logger.info(f"{'='*70}")
+            logger.info(f"--- Processing Subject {subject_id} ---")
 
             embeddings, metadata = process_subject_windows(subject_id, **kwargs)
             results[subject_id] = (embeddings, metadata)
@@ -354,11 +312,7 @@ def batch_process_subjects(
             logger.error(f"✗ Subject {subject_id} failed: {e}")
             failed.append(subject_id)
 
-    # Summary
-    logger.info(f"\n{'='*70}")
-    logger.info(f"Batch Processing Summary")
-    logger.info(f"{'='*70}")
-    logger.info(f"Successful: {len(results)}/{len(subject_ids)}")
+    logger.info(f"--- Batch complete: {len(results)}/{len(subject_ids)} successful ---")
     if failed:
         logger.info(f"Failed: {failed}")
 

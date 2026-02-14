@@ -22,10 +22,9 @@ from sklearn.manifold import TSNE
 from dotenv import load_dotenv
 import os
 
-# Load environment variables from .env file
 load_dotenv()
 
-# Bridge Streamlit Cloud secrets → os.environ so existing getenv() calls work
+# Copy Streamlit Cloud secrets to os.environ for getenv() calls
 try:
     for key, value in st.secrets.items():
         if isinstance(value, str) and key not in os.environ:
@@ -80,7 +79,6 @@ def api_key_credits_dialog():
             st.error("Please enter a valid API key.")
 
 
-# Page config
 st.set_page_config(
     page_title="Health Sync Monitor | Wood Wide AI",
     page_icon="static/favicon.svg",
@@ -88,7 +86,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# WoodWide.ai Dark Theme CSS - Professional Documentation Design
+# Dark theme CSS
 st.markdown("""
 <style>
     /* Import Inter font */
@@ -165,61 +163,24 @@ st.markdown("""
     }
 
     /* Callouts - Dark theme */
-    .info-callout {
-        background: linear-gradient(135deg, #1a2332 0%, #1e293b 100%);
-        border-left: 4px solid #3b82f6;
+    .info-callout, .warning-callout, .success-callout, .note-callout {
         padding: 1.25rem;
         margin: 1.5rem 0;
         border-radius: 0.5rem;
         color: #F3F1E5;
+        border-left: 4px solid var(--callout-border, var(--callout-accent));
+        background: var(--callout-bg);
     }
 
-    .info-callout strong {
-        color: #60a5fa;
+    .info-callout strong, .warning-callout strong, .success-callout strong, .note-callout strong {
+        color: var(--callout-accent);
         font-weight: 600;
     }
 
-    .warning-callout {
-        background: linear-gradient(135deg, #2d1f0a 0%, #3d2a0f 100%);
-        border-left: 4px solid #EB9D6C;
-        padding: 1.25rem;
-        margin: 1.5rem 0;
-        border-radius: 0.5rem;
-        color: #F3F1E5;
-    }
-
-    .warning-callout strong {
-        color: #EB9D6C;
-        font-weight: 600;
-    }
-
-    .success-callout {
-        background: linear-gradient(135deg, #1a221a 0%, #1e2a1e 100%);
-        border-left: 4px solid #F3F1E5;
-        padding: 1.25rem;
-        margin: 1.5rem 0;
-        border-radius: 0.5rem;
-        color: #F3F1E5;
-    }
-
-    .success-callout strong {
-        color: #F3F1E5;
-        font-weight: 600;
-    }
-
-    .note-callout {
-        background: linear-gradient(135deg, #1a2a2a 0%, #1e3a3a 100%);
-        border-left: 4px solid #8B7E6B;
-        padding: 1.25rem;
-        margin: 1.5rem 0;
-        border-radius: 0.5rem;
-        color: #F3F1E5;
-    }
-
-    .note-callout strong {
-        color: #8B7E6B;
-        font-weight: 600;
-    }
+    .info-callout    { --callout-accent: #60a5fa; --callout-border: #3b82f6; --callout-bg: linear-gradient(135deg, #1a2332 0%, #1e293b 100%); }
+    .warning-callout { --callout-accent: #EB9D6C; --callout-bg: linear-gradient(135deg, #2d1f0a 0%, #3d2a0f 100%); }
+    .success-callout { --callout-accent: #F3F1E5; --callout-bg: linear-gradient(135deg, #1a221a 0%, #1e2a1e 100%); }
+    .note-callout    { --callout-accent: #8B7E6B; --callout-bg: linear-gradient(135deg, #1a2a2a 0%, #1e3a3a 100%); }
 
     /* Tab descriptions - Dark */
     .tab-description {
@@ -635,13 +596,11 @@ def generate_sample_csv() -> str:
     Returns:
         CSV string
     """
-    # Create 10 minutes of sample data (matches realistic synthetic data)
-    duration = 600  # seconds (10 minutes)
+    duration = 600  # seconds
     ppg_rate = 64
     acc_rate = 32
 
-    # Activity schedule (in seconds)
-    # Ensure sufficient exercise data for detector training
+    # Enough exercise data for detector training
     activities = [
         (0, 60, 1),      # 0-1 min: Sitting
         (60, 180, 4),    # 1-3 min: Cycling
@@ -652,30 +611,23 @@ def generate_sample_csv() -> str:
         (540, 600, 1),   # 9-10 min: Sitting
     ]
 
-    # Generate timestamps
     t_ppg = np.arange(0, duration, 1/ppg_rate)
     t_acc = np.arange(0, duration, 1/acc_rate)
 
-    # Initialize signals
     ppg = np.zeros(len(t_ppg))
     accx = np.zeros(len(t_acc))
     accy = np.zeros(len(t_acc))
     accz = np.zeros(len(t_acc))
     labels = np.zeros(len(t_acc), dtype=int)
 
-    # Generate realistic signals for each activity period
     for start, end, activity_label in activities:
-        # Indices for this period
         ppg_start_idx = int(start * ppg_rate)
         ppg_end_idx = int(end * ppg_rate)
         acc_start_idx = int(start * acc_rate)
         acc_end_idx = int(end * acc_rate)
 
-        # Time arrays for this period
         t_ppg_period = t_ppg[ppg_start_idx:ppg_end_idx] - start
         t_acc_period = t_acc[acc_start_idx:acc_end_idx] - start
-
-        # Activity-specific parameters
         if activity_label == 1:  # Sitting
             hr_bpm = 72 + np.random.randn() * 3  # Resting HR
             ppg_baseline = 0.0
@@ -693,13 +645,11 @@ def generate_sample_csv() -> str:
             ppg_baseline = 0.0
             acc_intensity = 0.2
 
-        # Generate PPG signal with realistic heart rate
-        hr_freq = hr_bpm / 60.0  # Convert BPM to Hz
+        hr_freq = hr_bpm / 60.0
         ppg_signal = ppg_baseline + np.sin(2 * np.pi * hr_freq * t_ppg_period)
         ppg_signal += 0.1 * np.sin(2 * np.pi * 2 * hr_freq * t_ppg_period)  # Harmonics
         ppg_signal += np.random.randn(len(t_ppg_period)) * 0.05  # Noise
 
-        # Generate accelerometer with activity-specific patterns
         if activity_label == 4:  # Cycling - rhythmic pattern
             freq = 1.5  # ~90 RPM
             accx[acc_start_idx:acc_end_idx] = acc_intensity * np.sin(2 * np.pi * freq * t_acc_period)
@@ -715,21 +665,17 @@ def generate_sample_csv() -> str:
             accy[acc_start_idx:acc_end_idx] = acc_intensity * np.random.randn(len(t_acc_period))
             accz[acc_start_idx:acc_end_idx] = 9.81 + acc_intensity * np.random.randn(len(t_acc_period))
 
-        # Add noise to accelerometer
         accx[acc_start_idx:acc_end_idx] += np.random.randn(len(t_acc_period)) * 0.05
         accy[acc_start_idx:acc_end_idx] += np.random.randn(len(t_acc_period)) * 0.05
         accz[acc_start_idx:acc_end_idx] += np.random.randn(len(t_acc_period)) * 0.05
 
-        # Assign PPG and labels
         ppg[ppg_start_idx:ppg_end_idx] = ppg_signal
         labels[acc_start_idx:acc_end_idx] = activity_label
 
-    # Downsample PPG to match ACC rate for CSV
     from scipy.interpolate import interp1d
     ppg_interp = interp1d(t_ppg, ppg, kind='linear', bounds_error=False, fill_value='extrapolate')
     ppg_downsampled = ppg_interp(t_acc)
 
-    # Create DataFrame
     df = pd.DataFrame({
         'timestamp_acc': t_acc,
         'ppg': ppg_downsampled,
@@ -864,20 +810,15 @@ def parse_uploaded_csv(uploaded_file) -> Optional[Dict]:
         Dictionary with parsed data or None if invalid
     """
     try:
-        # Read CSV
         df = pd.read_csv(uploaded_file)
-
-        # Check for required columns (case-insensitive)
         df.columns = df.columns.str.lower()
 
-        # Required columns
         required_cols = ['ppg', 'accx', 'accy', 'accz', 'label']
         if not all(col in df.columns for col in required_cols):
             st.error(f"Missing required columns. Need: {required_cols}")
             st.error(f"Found: {df.columns.tolist()}")
             return None
 
-        # Extract data
         data = {
             'ppg': df['ppg'].values.astype(np.float32),
             'acc_x': df['accx'].values.astype(np.float32),
@@ -926,10 +867,8 @@ def preprocess_uploaded_data(
         Dictionary with preprocessed windows or None if error
     """
     try:
-        # Create preprocessor (no parameters needed)
         preprocessor = PPGDaLiaPreprocessor()
 
-        # Convert raw arrays to DataFrames for preprocessor
         ppg_df = pd.DataFrame({
             'ppg': data['ppg'],
             'timestamp': data['timestamps_ppg']
@@ -947,13 +886,8 @@ def preprocess_uploaded_data(
             'timestamp': data['timestamps_acc']  # Use ACC timestamps for labels
         })
 
-        # Synchronize signals to common timeline
         synced_df = preprocessor.synchronize_signals(ppg_df, acc_df, labels_df)
-
-        # Compute derived features (accelerometer magnitude)
         synced_df = preprocessor.compute_derived_features(synced_df)
-
-        # Create rolling windows (window_seconds and stride_seconds go here)
         windows, timestamps, labels = preprocessor.create_rolling_windows(
             synced_df,
             window_seconds=window_seconds,
@@ -1380,7 +1314,6 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    # Initialize session state
     if 'uploaded_data' not in st.session_state:
         st.session_state.uploaded_data = None
     if 'run_detection' not in st.session_state:
@@ -1460,7 +1393,6 @@ def main():
                 format_func=lambda x: "Demo Data" if x == "demo" else f"Subject {x}"
             )
 
-            # Load data
             data = load_subject_data(subject_id)
             if data is None:
                 st.error(f"Could not load data for subject {subject_id}")
@@ -1679,7 +1611,6 @@ def main():
         Select configuration options above and click 'Run Detection' to begin analysis.
         """)
 
-    # Extract data
     windows = data['windows']
     timestamps = data['timestamps']
     labels = data['labels']
@@ -1819,14 +1750,11 @@ def main():
         st.subheader("Method 1: Heart Rate Threshold")
         st.markdown(f"Alert when Heart Rate > {baseline_threshold} BPM")
 
-        # Extract HR
         with st.spinner("Extracting heart rate from PPG signal..."):
             hr_bpm = extract_heart_rate_simple(windows)
 
-        # Apply threshold
         baseline_alerts = hr_bpm > baseline_threshold
 
-        # Compute metrics
         is_exercise = np.isin(labels, [2, 3, 4, 7])
         is_rest = ~is_exercise
 
@@ -1966,9 +1894,6 @@ def main():
         df_perf = pd.DataFrame(activity_perf)
         st.dataframe(df_perf, hide_index=True, use_container_width=True)
 
-        # ============================================================
-        # ISOLATION FOREST SECTION
-        # ============================================================
         st.divider()
         st.subheader("Method 2: Isolation Forest (Classic ML)")
 
@@ -1981,7 +1906,6 @@ def main():
         with st.expander("How Isolation Forest Works", expanded=False):
             st.markdown(ALGORITHM_EXPLANATIONS["isolation_forest_how_it_works"])
 
-        # Run Isolation Forest
         with st.spinner("Training Isolation Forest on exercise windows..."):
             iforest_detector = IsolationForestDetector(contamination=0.1)
             iforest_detector.fit(windows, labels)
@@ -1993,7 +1917,6 @@ def main():
             )
             iforest_metrics['alerts'] = iforest_result.alerts
 
-        # Metrics row
         if_col1, if_col2, if_col3, if_col4 = st.columns(4)
 
         with if_col1:
@@ -2130,9 +2053,6 @@ def main():
         df_if_perf = pd.DataFrame(if_activity_perf)
         st.dataframe(df_if_perf, hide_index=True, use_container_width=True)
 
-        # ============================================================
-        # QUICK COMPARISON & UNIFIED CONCLUSION
-        # ============================================================
         st.divider()
         st.subheader("Threshold vs. Isolation Forest")
 
@@ -2154,7 +2074,6 @@ def main():
 
         st.divider()
 
-        # Unified conclusion
         st.subheader("Why Classic Methods Fail")
 
         card_configs = [

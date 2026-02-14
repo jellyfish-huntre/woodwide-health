@@ -104,7 +104,6 @@ class WoodWideDetector:
             # PPG-DaLiA: 2=Stairs, 3=Table Soccer, 4=Cycling, 7=Walking
             exercise_labels = [2, 3, 4, 7]
 
-        # Find exercise windows
         exercise_mask = np.isin(labels, exercise_labels)
         exercise_embeddings = embeddings[exercise_mask]
 
@@ -114,13 +113,8 @@ class WoodWideDetector:
                 f"(need at least {self.min_samples_for_fit})"
             )
 
-        # Compute normal activity centroid (mean of exercise embeddings)
         self.normal_centroid = exercise_embeddings.mean(axis=0)
-
-        # Compute distances from training samples to centroid
         distances = self._compute_distances(exercise_embeddings)
-
-        # Set threshold as percentile of training distances
         self.distance_threshold = np.percentile(distances, self.threshold_percentile)
 
         # Dual-threshold mode: compute a separate threshold for rest windows
@@ -165,7 +159,6 @@ class WoodWideDetector:
         if not self.fitted:
             raise RuntimeError("Detector must be fitted before prediction. Call fit() first.")
 
-        # Compute distances from normal centroid
         distances = self._compute_distances(embeddings)
 
         # Dual-threshold mode: separate thresholds for exercise vs rest
@@ -210,7 +203,6 @@ class WoodWideDetector:
             labels=labels, exercise_labels=exercise_labels
         )
 
-        # Compute metrics
         metrics = self._compute_metrics(alerts, labels, exercise_labels)
 
         return DetectionResult(
@@ -222,18 +214,8 @@ class WoodWideDetector:
         )
 
     def _compute_distances(self, embeddings: np.ndarray) -> np.ndarray:
-        """
-        Compute Euclidean distances from embeddings to normal centroid.
-
-        Args:
-            embeddings: Embeddings, shape (n_samples, embedding_dim)
-
-        Returns:
-            Distances, shape (n_samples,)
-        """
-        # Euclidean distance: ||embedding - centroid||_2
-        distances = np.linalg.norm(embeddings - self.normal_centroid, axis=1)
-        return distances
+        """Euclidean distance: ||embedding - centroid||_2"""
+        return np.linalg.norm(embeddings - self.normal_centroid, axis=1)
 
     def _compute_metrics(
         self,
@@ -255,16 +237,13 @@ class WoodWideDetector:
         if exercise_labels is None:
             exercise_labels = [2, 3, 4, 7]
 
-        # Create masks
         is_exercise = np.isin(labels, exercise_labels)
         is_rest = ~is_exercise
 
-        # Count alerts
         total_alerts = alerts.sum()
         alerts_during_exercise = (alerts & is_exercise).sum()
         alerts_during_rest = (alerts & is_rest).sum()
 
-        # Compute rates
         false_positive_rate = (
             alerts_during_exercise / is_exercise.sum() * 100
             if is_exercise.sum() > 0 else 0
@@ -387,11 +366,9 @@ class MultiCentroidDetector(WoodWideDetector):
             activity_embeddings = embeddings[activity_mask]
 
             if len(activity_embeddings) >= self.min_samples_for_fit:
-                # Learn centroid for this activity
                 centroid = activity_embeddings.mean(axis=0)
                 self.activity_centroids[int(activity)] = centroid
 
-                # Compute distance threshold for this activity
                 distances = np.linalg.norm(activity_embeddings - centroid, axis=1)
                 threshold = np.percentile(distances, self.threshold_percentile)
                 self.activity_thresholds[int(activity)] = threshold
@@ -430,15 +407,12 @@ class MultiCentroidDetector(WoodWideDetector):
             if not activity_mask.any():
                 continue
 
-            # Compute distances for this activity
             activity_embeddings = embeddings[activity_mask]
             activity_distances = np.linalg.norm(activity_embeddings - centroid, axis=1)
 
-            # Check against activity-specific threshold
             threshold = self.activity_thresholds[activity]
             activity_alerts = activity_distances > threshold
 
-            # Store results
             distances[activity_mask] = activity_distances
             alerts[activity_mask] = activity_alerts
 

@@ -59,7 +59,6 @@ class IsolationForestDetector:
         self.n_estimators = n_estimators
         self.random_state = random_state
 
-        # Initialize model and scaler
         self.model = IsolationForest(
             contamination=contamination,
             n_estimators=n_estimators,
@@ -87,11 +86,8 @@ class IsolationForestDetector:
         """
         n_windows = windows.shape[0]
 
-        # Compute mean and std for each signal
         means = windows.mean(axis=1)  # (n_windows, 5)
         stds = windows.std(axis=1)    # (n_windows, 5)
-
-        # Concatenate into feature vector
         features = np.concatenate([means, stds], axis=1)  # (n_windows, 10)
 
         return features
@@ -117,7 +113,7 @@ class IsolationForestDetector:
         Returns:
             self (for method chaining)
         """
-        # Filter to exercise windows (same as Wood Wide)
+        # Same training set as Wood Wide for fair comparison
         exercise_mask = np.isin(labels, exercise_labels)
         exercise_windows = windows[exercise_mask]
 
@@ -129,13 +125,8 @@ class IsolationForestDetector:
 
         print(f"Isolation Forest: Training on {len(exercise_windows)} exercise windows")
 
-        # Extract features
         features = self._extract_features(exercise_windows)
-
-        # Fit scaler
         features_scaled = self.scaler.fit_transform(features)
-
-        # Fit Isolation Forest
         self.model.fit(features_scaled)
 
         self.is_fitted = True
@@ -158,7 +149,6 @@ class IsolationForestDetector:
         if not self.is_fitted:
             raise RuntimeError("Detector must be fitted before prediction. Call fit() first.")
 
-        # Extract and scale features
         features = self._extract_features(windows)
         features_scaled = self.scaler.transform(features)
 
@@ -238,11 +228,9 @@ def analyze_performance(
             5: 'Descending stairs'
         }
 
-    # Overall metrics
     total_alerts = result.alerts.sum()
     alert_rate = result.alerts.mean()
 
-    # Exercise vs rest
     exercise_labels = [2, 3, 4, 7]
     exercise_mask = np.isin(labels, exercise_labels)
     rest_mask = ~exercise_mask

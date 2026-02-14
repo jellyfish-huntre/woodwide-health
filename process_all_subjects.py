@@ -48,14 +48,12 @@ def process_all_subjects(
 
     for subject_id in subjects:
         try:
-            # Process subject
             processed = preprocessor.process_subject(
                 subject_id=subject_id,
                 window_seconds=window_seconds,
                 stride_seconds=stride_seconds
             )
 
-            # Save
             preprocessor.save_processed_data(processed, output_dir=output_dir)
 
             successful += 1

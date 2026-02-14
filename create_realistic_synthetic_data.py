@@ -151,7 +151,6 @@ def create_subject_data(
     print(f"  Generating subject {subject_id}:")
     print(f"    Total duration: {total_duration} seconds ({total_duration/60:.1f} minutes)")
 
-    # Initialize arrays
     ppg_total = []
     acc_x_total = []
     acc_y_total = []
@@ -165,30 +164,24 @@ def create_subject_data(
     for activity_id, duration, hr_bpm, intensity in activity_sequence:
         print(f"    {duration}s - Activity {activity_id} - HR {hr_bpm} BPM")
 
-        # Generate PPG
         ppg_segment = generate_ppg_signal(duration, ppg_rate, hr_bpm)
         ppg_total.append(ppg_segment)
 
-        # Generate timestamps for PPG
         ppg_times = current_time + np.arange(len(ppg_segment)) / ppg_rate
         timestamps_ppg.append(ppg_times)
 
-        # Generate accelerometer
         acc_x, acc_y, acc_z = generate_accelerometer_signal(duration, acc_rate, intensity)
         acc_x_total.append(acc_x)
         acc_y_total.append(acc_y)
         acc_z_total.append(acc_z)
 
-        # Generate timestamps for accelerometer
         acc_times = current_time + np.arange(len(acc_x)) / acc_rate
         timestamps_acc.append(acc_times)
 
-        # Create labels (one per accelerometer sample)
         labels.append(np.full(len(acc_x), activity_id))
 
         current_time += duration
 
-    # Concatenate all segments
     ppg = np.concatenate(ppg_total)
     acc_x = np.concatenate(acc_x_total)
     acc_y = np.concatenate(acc_y_total)
@@ -224,7 +217,6 @@ def main():
     for subject_id in range(1, n_subjects + 1):
         data = create_subject_data(subject_id)
 
-        # Save as pickle
         output_file = output_dir / f"S{subject_id}.pkl"
         with open(output_file, 'wb') as f:
             pickle.dump(data, f)
