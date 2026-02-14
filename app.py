@@ -18,6 +18,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import plotly.express as px
 from typing import Dict, Optional, Tuple, Union
+from sklearn.manifold import TSNE
 from dotenv import load_dotenv
 import os
 
@@ -32,16 +33,16 @@ try:
 except FileNotFoundError:
     pass  # No secrets.toml — running locally with .env
 
-from src.detectors.woodwide import WoodWideDetector, DetectionResult
+from src.detectors.woodwide import WoodWideDetector, MultiCentroidDetector, DetectionResult
 from src.detectors.isolation_forest_detector import IsolationForestDetector
 from src.embeddings.api_client import MockAPIClient
 from src.embeddings.generate import send_windows_to_woodwide
 from src.ingestion.preprocess import PPGDaLiaPreprocessor
 from streamlit_helpers import (
     compute_isolation_forest_metrics,
-    create_three_way_comparison_chart,
     create_three_way_timeline,
-    create_comparison_table
+    create_extended_comparison_chart,
+    create_extended_comparison_table
 )
 from app_code_snippets import (
     display_code_snippet,
@@ -454,6 +455,24 @@ def load_embeddings(subject_id: Union[int, str]) -> Optional[Tuple[np.ndarray, D
         metadata = pickle.load(f)
 
     return embeddings, metadata
+
+
+@st.cache_data
+def compute_tsne(embeddings: np.ndarray, perplexity: float = 30.0, random_state: int = 42) -> np.ndarray:
+    """Compute 2D t-SNE projection of embeddings.
+
+    Args:
+        embeddings: Shape (n_windows, embedding_dim)
+        perplexity: t-SNE perplexity (clamped to n_samples - 1)
+        random_state: Random seed for reproducibility
+
+    Returns:
+        Shape (n_windows, 2) — 2D coordinates for scatter plot
+    """
+    effective_perplexity = min(perplexity, len(embeddings) - 1)
+    tsne = TSNE(n_components=2, perplexity=effective_perplexity,
+                random_state=random_state, max_iter=1000)
+    return tsne.fit_transform(embeddings)
 
 
 @st.cache_data
@@ -1487,6 +1506,29 @@ def main():
             help="Higher = fewer alerts (less sensitive)"
         )
 
+        # Detection mode
+        detection_mode = st.radio(
+            "Wood Wide Detection Mode",
+            options=["Single Centroid", "Dual Threshold", "Multi-Centroid"],
+            index=0,
+            help=(
+                "Single Centroid: One exercise centroid, one threshold (original). "
+                "Dual Threshold: Separate thresholds for exercise vs rest. "
+                "Multi-Centroid: Per-activity centroids."
+            )
+        )
+
+        rest_percentile = None
+        if detection_mode == "Dual Threshold":
+            rest_percentile = st.slider(
+                "Rest Threshold Percentile",
+                min_value=90,
+                max_value=99,
+                value=99,
+                step=1,
+                help="Higher = fewer rest alerts (only truly anomalous rest triggers)"
+            )
+
         st.divider()
 
         # Generate embeddings option — default to mock when no API key
@@ -2100,6 +2142,10 @@ def main():
         # Load or generate embeddings
         embeddings_data = load_embeddings(subject_id)
 
+        # Invalidate stale cache if embedding count doesn't match current windows
+        if embeddings_data is not None and embeddings_data[0].shape[0] != len(windows):
+            embeddings_data = None
+
         if embeddings_data is None or force_regenerate:
             with st.status("Generating embeddings via Wood Wide API...", expanded=True) as status:
                 try:
@@ -2153,7 +2199,17 @@ def main():
 
         # Fit detector
         with st.spinner("Fitting Wood Wide detector..."):
-            detector = WoodWideDetector(threshold_percentile=woodwide_percentile)
+            if detection_mode == "Dual Threshold":
+                detector = WoodWideDetector(
+                    threshold_percentile=woodwide_percentile,
+                    rest_threshold_percentile=rest_percentile
+                )
+            elif detection_mode == "Multi-Centroid":
+                detector = MultiCentroidDetector(
+                    threshold_percentile=woodwide_percentile
+                )
+            else:
+                detector = WoodWideDetector(threshold_percentile=woodwide_percentile)
             result = detector.fit_predict(embeddings, labels)
 
         # Metrics
@@ -2322,6 +2378,76 @@ def main():
 
         st.divider()
 
+        # Embedding Space Visualization (t-SNE)
+        st.subheader("Embedding Space Visualization")
+
+        st.markdown("""
+        Each window is represented as a **128-dimensional embedding** by the Wood Wide API.
+        The plot below uses **t-SNE** to project these embeddings into 2D, revealing how
+        different activities cluster in the learned representation space.
+        """)
+
+        tsne_2d = compute_tsne(embeddings)
+
+        exercise_labels = {2, 3, 4, 7}
+        colors = px.colors.qualitative.Plotly
+
+        tsne_fig = go.Figure()
+
+        for i, (label, activity) in enumerate(activity_map.items()):
+            mask = labels == label
+            if not mask.any():
+                continue
+            is_exercise = label in exercise_labels
+            tsne_fig.add_trace(go.Scatter(
+                x=tsne_2d[mask, 0],
+                y=tsne_2d[mask, 1],
+                mode='markers',
+                name=f"{activity} ({'Ex' if is_exercise else 'Rest'})",
+                marker=dict(
+                    size=7,
+                    color=colors[i % len(colors)],
+                    symbol='circle' if is_exercise else 'diamond',
+                    opacity=0.7,
+                ),
+                hovertemplate=f"<b>{activity}</b><br>t-SNE 1: %{{x:.1f}}<br>t-SNE 2: %{{y:.1f}}<extra></extra>",
+            ))
+
+        # Overlay alert markers
+        if result.alerts.any():
+            tsne_fig.add_trace(go.Scatter(
+                x=tsne_2d[result.alerts, 0],
+                y=tsne_2d[result.alerts, 1],
+                mode='markers',
+                name='Alert',
+                marker=dict(size=11, color='red', symbol='x', line=dict(width=2)),
+                hovertemplate="<b>Alert</b><br>t-SNE 1: %{x:.1f}<br>t-SNE 2: %{y:.1f}<extra></extra>",
+            ))
+
+        tsne_fig.update_layout(
+            height=550,
+            xaxis_title="t-SNE 1",
+            yaxis_title="t-SNE 2",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            hovermode='closest',
+        )
+
+        st.plotly_chart(tsne_fig, use_container_width=True)
+
+        st.markdown("""
+        <div class="info-callout">
+        <strong>How to read this plot</strong><br><br>
+        <strong>Circles</strong> = exercise windows &nbsp;&nbsp;
+        <strong>Diamonds</strong> = rest windows &nbsp;&nbsp;
+        <span style="color:#e74c3c;font-weight:bold;">X</span> = detected anomalies<br><br>
+        Activities that cluster together have similar embedding signatures. Exercise activities
+        should form tight groups, while anomalous windows (red X) appear far from the exercise
+        cluster — this is exactly how the centroid-based detector identifies them.
+        </div>
+        """, unsafe_allow_html=True)
+
+        st.divider()
+
         # Advanced topics in expandable sections
         with st.expander("How Wood Wide Detection Works"):
             st.markdown(ALGORITHM_EXPLANATIONS["woodwide_how_it_works"])
@@ -2353,11 +2479,13 @@ def main():
         **Detection Methods:**
         1. **Baseline Threshold**: Simple heart rate threshold (HR > {baseline_threshold} BPM)
         2. **Isolation Forest**: Traditional anomaly detection on hand-crafted features
-        3. **Wood Wide**: Context-aware detection using multivariate embeddings
+        3. **Wood Wide (Original)**: Single exercise centroid, single threshold
+        4. **Wood Wide (Dual Threshold)**: Single centroid, separate thresholds for exercise vs rest
+        5. **Wood Wide (Multi-Centroid)**: Per-activity centroids with activity-specific thresholds
 
         **Evaluation Metrics:**
-        - **False Positive Rate:** Alerts during exercise (should be low)
-        - **True Positive Rate:** Alerts during rest anomalies (should be high)
+        - **Exercise FP Rate:** Alerts during exercise (should be low)
+        - **Rest Detection Rate:** Alerts during rest (higher = more sensitive, but includes false rest alerts)
         - **Total Alert Count:** System usability indicator
 
         **Test Dataset:**
@@ -2381,8 +2509,27 @@ def main():
             return
 
         embeddings, _ = embeddings_data
-        detector = WoodWideDetector(threshold_percentile=woodwide_percentile)
-        result = detector.fit_predict(embeddings, labels)
+
+        # Check for stale cache (embedding count must match current windows)
+        if embeddings.shape[0] != len(windows):
+            st.warning(
+                f"Cached embeddings ({embeddings.shape[0]} windows) don't match "
+                f"current data ({len(windows)} windows). Please regenerate embeddings "
+                f"in the Wood Wide tab."
+            )
+            return
+        # Run all Wood Wide variants
+        original_detector = WoodWideDetector(threshold_percentile=woodwide_percentile)
+        original_result = original_detector.fit_predict(embeddings, labels)
+
+        dual_detector = WoodWideDetector(
+            threshold_percentile=woodwide_percentile,
+            rest_threshold_percentile=99
+        )
+        dual_result = dual_detector.fit_predict(embeddings, labels)
+
+        multi_detector = MultiCentroidDetector(threshold_percentile=woodwide_percentile)
+        multi_result = multi_detector.fit_predict(embeddings, labels)
 
         # Run Isolation Forest detection
         with st.spinner("Running Isolation Forest detection..."):
@@ -2409,45 +2556,56 @@ def main():
             'rest_windows': int((~is_exercise).sum())
         }
 
-        # Three-way comparison chart
+        # For backward-compatible three-way timeline, use original result
+        result = original_result
+
+        # Five-way comparison chart
         st.subheader("Performance Comparison")
 
-        three_way_fig = create_three_way_comparison_chart(
-            baseline_fp_rate=baseline_metrics['false_positive_rate_pct'],
-            if_fp_rate=iforest_metrics['false_positive_rate_pct'],
-            woodwide_fp_rate=result.metrics['false_positive_rate_pct']
+        method_names = [
+            'Naive<br>Threshold',
+            'Isolation<br>Forest',
+            'Wood Wide<br>(Original)',
+            'Wood Wide<br>(Dual-Thresh)',
+            'Wood Wide<br>(Multi-Centroid)'
+        ]
+        all_fp_rates = [
+            baseline_metrics['false_positive_rate_pct'],
+            iforest_metrics['false_positive_rate_pct'],
+            original_result.metrics['false_positive_rate_pct'],
+            dual_result.metrics['false_positive_rate_pct'],
+            multi_result.metrics['false_positive_rate_pct'],
+        ]
+
+        five_way_fig = create_extended_comparison_chart(
+            method_names, all_fp_rates
         )
-        st.plotly_chart(three_way_fig, use_container_width=True)
+        st.plotly_chart(five_way_fig, use_container_width=True)
 
         st.divider()
 
         # Detailed comparison table
         st.subheader("Detailed Metrics")
 
-        comparison_table = create_comparison_table(
-            baseline_metrics=baseline_metrics,
-            if_metrics=iforest_metrics,
-            woodwide_metrics=result.metrics
-        )
+        table_names = ['Baseline', 'Isolation Forest', 'WW Original', 'WW Dual-Thresh', 'WW Multi-Centroid']
+        table_metrics = [baseline_metrics, iforest_metrics, original_result.metrics, dual_result.metrics, multi_result.metrics]
+        comparison_table = create_extended_comparison_table(table_names, table_metrics)
         st.dataframe(comparison_table, hide_index=True, use_container_width=True)
 
         # Key insights
-        baseline_fp = baseline_metrics['false_positive_rate_pct']
-        iforest_fp = iforest_metrics['false_positive_rate_pct']
-        woodwide_fp = result.metrics['false_positive_rate_pct']
-
-        if woodwide_fp < iforest_fp and woodwide_fp < baseline_fp:
-            improvement_vs_baseline = baseline_fp - woodwide_fp
-            improvement_vs_iforest = iforest_fp - woodwide_fp
-            create_callout(
-                f"**Wood Wide achieves the lowest false positive rate:**\n\n"
-                f"- **{improvement_vs_baseline:.1f}%** better than Threshold Detection\n"
-                f"- **{improvement_vs_iforest:.1f}%** better than Isolation Forest\n\n"
-                "Wood Wide's context-aware embeddings successfully distinguish exercise from health concerns, "
-                "outperforming both traditional threshold methods and hand-crafted feature approaches.",
-                type="success",
-                title="Best Performance: Wood Wide"
-            )
+        original_fp = original_result.metrics['false_positive_rate_pct']
+        dual_fp = dual_result.metrics['false_positive_rate_pct']
+        multi_fp = multi_result.metrics['false_positive_rate_pct']
+        create_callout(
+            f"**Original Single Centroid:** {original_fp:.1f}% exercise FP\n\n"
+            f"**Dual Threshold (99th %ile rest):** {dual_fp:.1f}% exercise FP\n\n"
+            f"**Multi-Centroid:** {multi_fp:.1f}% exercise FP\n\n"
+            "All Wood Wide approaches maintain low exercise false positive rates. "
+            "Dual-threshold and multi-centroid detectors use context-aware thresholds "
+            "for more precise anomaly detection across different activity types.",
+            type="info",
+            title="Exercise False Positive Comparison"
+        )
 
         st.divider()
 
@@ -2555,6 +2713,24 @@ def main():
 3. **Practical for deployment**: Manageable alert rate
 4. **Embedding-based**: Learns relationships automatically""")
 
+        st.markdown("### Enhanced Wood Wide Approaches")
+
+        col4, col5 = st.columns(2)
+
+        with col4:
+            st.markdown("#### Dual Threshold")
+            st.markdown("""**Improves rest alert precision:**
+1. **Context-dependent thresholds**: Conservative for exercise, strict for rest
+2. **Reduces false rest alerts**: 99th percentile for rest filters noise
+3. **Same centroid**: Preserves exercise FP performance""")
+
+        with col5:
+            st.markdown("#### Multi-Centroid")
+            st.markdown("""**Per-activity normal patterns:**
+1. **Activity-specific centroids**: Each activity has its own "normal"
+2. **Best precision**: Only flags within-activity outliers
+3. **Requires labels**: Activity type needed at inference time""")
+
         st.markdown("""
         ### The Context Problem: Solved
 
@@ -2564,6 +2740,10 @@ def main():
 
         **Wood Wide doesn't just set a better threshold or engineer better features—it solves a fundamentally
         different problem by understanding how signals relate to each other in a learned representation space.**
+
+        The dual-threshold and multi-centroid approaches further refine this by improving rest alert precision,
+        ensuring that alerts during rest periods represent genuinely anomalous patterns rather than simply
+        "different from exercise."
         """)
 
         # Further Reading

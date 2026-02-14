@@ -9,23 +9,28 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 
 def compute_isolation_forest_metrics(if_alerts: np.ndarray, labels: np.ndarray) -> Dict:
     """Compute performance metrics for Isolation Forest detection."""
     is_exercise = np.isin(labels, [2, 3, 4, 7])
+    is_rest = ~is_exercise
 
     return {
         'total_alerts': int(if_alerts.sum()),
         'alerts_during_exercise': int((if_alerts & is_exercise).sum()),
-        'alerts_during_rest': int((if_alerts & ~is_exercise).sum()),
+        'alerts_during_rest': int((if_alerts & is_rest).sum()),
         'false_positive_rate_pct': (
             (if_alerts & is_exercise).sum() / is_exercise.sum() * 100
             if is_exercise.sum() > 0 else 0
         ),
+        'true_positive_rate_pct': (
+            (if_alerts & is_rest).sum() / is_rest.sum() * 100
+            if is_rest.sum() > 0 else 0
+        ),
         'exercise_windows': int(is_exercise.sum()),
-        'rest_windows': int((~is_exercise).sum())
+        'rest_windows': int(is_rest.sum())
     }
 
 
@@ -35,7 +40,7 @@ def create_three_way_comparison_chart(
     woodwide_fp_rate: float
 ) -> go.Figure:
     """
-    Create bar chart comparing false positive rates across three methods.
+    Create bar chart comparing exercise false positive rates across three methods.
 
     Args:
         baseline_fp_rate: Baseline threshold FP rate (%)
@@ -47,14 +52,13 @@ def create_three_way_comparison_chart(
     """
     methods = ['Naive<br>Threshold', 'Isolation<br>Forest', 'Wood Wide']
     fp_rates = [baseline_fp_rate, if_fp_rate, woodwide_fp_rate]
-    colors = ['#e74c3c', '#f39c12', '#27ae60']
 
     fig = go.Figure()
 
     fig.add_trace(go.Bar(
         x=methods,
         y=fp_rates,
-        marker_color=colors,
+        marker_color=['#e74c3c', '#f39c12', '#27ae60'],
         text=[f'{rate:.1f}%' for rate in fp_rates],
         textposition='outside',
         textfont=dict(size=14, family='Inter'),
@@ -246,3 +250,92 @@ def create_comparison_table(
             woodwide_metrics['rest_windows']
         ]
     })
+
+
+def create_extended_comparison_chart(
+    methods: List[str],
+    fp_rates: List[float],
+    colors: Optional[List[str]] = None
+) -> go.Figure:
+    """
+    Create bar chart comparing exercise false positive rates across N methods.
+
+    Args:
+        methods: Method display names (can include HTML <br> for wrapping)
+        fp_rates: Exercise false positive rates (%)
+        colors: Optional per-method colors
+
+    Returns:
+        Plotly figure
+    """
+    if colors is None:
+        colors = ['#e74c3c', '#f39c12', '#27ae60', '#2980b9', '#8e44ad']
+    # Ensure enough colors
+    while len(colors) < len(methods):
+        colors.append('#95a5a6')
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Bar(
+        x=methods,
+        y=fp_rates,
+        marker_color=colors[:len(methods)],
+        text=[f'{r:.1f}%' for r in fp_rates],
+        textposition='outside',
+        textfont=dict(size=12, family='Inter'),
+        hovertemplate='%{x}<br>FP Rate: %{y:.1f}%<extra></extra>'
+    ))
+
+    max_rate = max(fp_rates) if fp_rates else 10
+    fig.update_layout(
+        title=dict(
+            text="Exercise False Positive Rates",
+            font=dict(size=16, family='Inter')
+        ),
+        yaxis=dict(
+            title="False Positive Rate (%)",
+            range=[0, max(max_rate * 1.15, max_rate + 10)]
+        ),
+        xaxis_title="Detection Method",
+        height=500,
+        showlegend=False,
+    )
+
+    return fig
+
+
+def create_extended_comparison_table(
+    method_names: List[str],
+    metrics_list: List[Dict]
+) -> pd.DataFrame:
+    """
+    Create comparison table for N detection methods.
+
+    Args:
+        method_names: Display names for each method
+        metrics_list: List of metrics dicts (one per method)
+
+    Returns:
+        DataFrame with comparison data
+    """
+    rows = [
+        'Total Alerts',
+        'Exercise Alerts (FP)',
+        'Rest Alerts',
+        'Exercise FP Rate',
+        'Exercise Windows',
+        'Rest Windows'
+    ]
+
+    data = {'Metric': rows}
+    for name, m in zip(method_names, metrics_list):
+        data[name] = [
+            m['total_alerts'],
+            m['alerts_during_exercise'],
+            m['alerts_during_rest'],
+            f"{m['false_positive_rate_pct']:.1f}%",
+            m['exercise_windows'],
+            m['rest_windows']
+        ]
+
+    return pd.DataFrame(data)

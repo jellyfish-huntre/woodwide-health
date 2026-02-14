@@ -72,16 +72,17 @@ def main():
     # Method 1: Baseline Threshold
     baseline_alerts = hr_bpm > args.baseline_threshold
     is_exercise = np.isin(labels, [2, 3, 4, 7])
+    is_rest = ~is_exercise
     baseline_metrics = {
         'total_alerts': int(baseline_alerts.sum()),
         'alerts_during_exercise': int((baseline_alerts & is_exercise).sum()),
-        'alerts_during_rest': int((baseline_alerts & ~is_exercise).sum()),
+        'alerts_during_rest': int((baseline_alerts & is_rest).sum()),
         'false_positive_rate_pct': (
             (baseline_alerts & is_exercise).sum() / is_exercise.sum() * 100
             if is_exercise.sum() > 0 else 0
         ),
         'exercise_windows': int(is_exercise.sum()),
-        'rest_windows': int((~is_exercise).sum())
+        'rest_windows': int(is_rest.sum())
     }
 
     # Method 2: Isolation Forest
@@ -135,7 +136,7 @@ def main():
     # Create visualizations
     print("\nGenerating visualizations...")
 
-    # 1. FP Rate comparison chart
+    # 1. FP Rate + Rest Detection Rate comparison chart
     fp_chart = create_three_way_comparison_chart(
         baseline_metrics['false_positive_rate_pct'],
         if_metrics['false_positive_rate_pct'],
@@ -171,14 +172,20 @@ def main():
         combined_fig.add_trace(trace, row=1, col=1)
 
     # Update axis from FP chart
+    all_rates = [
+        baseline_metrics['false_positive_rate_pct'],
+        if_metrics['false_positive_rate_pct'],
+        ww_metrics['false_positive_rate_pct'],
+    ]
+    max_rate = max(all_rates)
     combined_fig.update_yaxes(
-        title_text="False Positive Rate (%)",
+        title_text="Rate (%)",
         row=1, col=1,
-        range=[0, min(baseline_metrics['false_positive_rate_pct'] * 1.2, 105)]
+        range=[0, min(max_rate * 1.2, 105)]
     )
 
     # Show in browser
-    combined_fig.update_layout(height=900, showlegend=False, title_text=f"Subject {args.subject_id}: Three-Way Detection Comparison")
+    combined_fig.update_layout(height=900, showlegend=True, title_text=f"Subject {args.subject_id}: Three-Way Detection Comparison")
 
     if args.save_html:
         output_file = f"three_way_comparison_subject_{args.subject_id}.html"

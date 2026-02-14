@@ -95,7 +95,7 @@ Notable: stairs and walking have near-zero false positive rates. Cycling is high
 
 1. **Multi-centroid detection:** Train separate centroids per activity type to reduce rest false alerts. The `MultiCentroidDetector` is already implemented in `src/detectors/woodwide.py` but needs activity labels at inference time.
 
-2. **Embedding space visualization:** Add t-SNE or UMAP plots showing how activities cluster in embedding space. This would provide intuitive visual evidence for why the approach works.
+2. ~~**Embedding space visualization:** Add t-SNE or UMAP plots showing how activities cluster in embedding space. This would provide intuitive visual evidence for why the approach works.~~ *(Done: Tab 3 of the Streamlit dashboard includes an interactive t-SNE scatter plot colored by activity type.)*
 
 3. **Cross-subject evaluation:** Train on subjects 1-3, test on subjects 4-5 to measure generalization. Currently each subject is evaluated independently.
 

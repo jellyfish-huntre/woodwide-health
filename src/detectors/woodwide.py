@@ -51,7 +51,8 @@ class WoodWideDetector:
     def __init__(
         self,
         threshold_percentile: float = 95.0,
-        min_samples_for_fit: int = 10
+        min_samples_for_fit: int = 10,
+        rest_threshold_percentile: Optional[float] = None
     ):
         """
         Initialize Wood Wide detector.
@@ -60,13 +61,19 @@ class WoodWideDetector:
             threshold_percentile: Percentile of training distances to use as threshold
                                  (95 = alert on top 5% most unusual)
             min_samples_for_fit: Minimum samples needed to fit detector
+            rest_threshold_percentile: If set, use a separate threshold for rest windows
+                                      computed from rest distances to the exercise centroid.
+                                      Higher values (e.g. 99) = fewer rest alerts.
+                                      None = single threshold for all windows (original behavior).
         """
         self.threshold_percentile = threshold_percentile
         self.min_samples_for_fit = min_samples_for_fit
+        self.rest_threshold_percentile = rest_threshold_percentile
 
         # Learned parameters
         self.normal_centroid: Optional[np.ndarray] = None
         self.distance_threshold: Optional[float] = None
+        self.rest_distance_threshold: Optional[float] = None
         self.fitted: bool = False
 
     def fit(
@@ -116,6 +123,18 @@ class WoodWideDetector:
         # Set threshold as percentile of training distances
         self.distance_threshold = np.percentile(distances, self.threshold_percentile)
 
+        # Dual-threshold mode: compute a separate threshold for rest windows
+        if self.rest_threshold_percentile is not None:
+            rest_mask = ~exercise_mask
+            rest_embeddings = embeddings[rest_mask]
+            if len(rest_embeddings) >= self.min_samples_for_fit:
+                rest_distances = self._compute_distances(rest_embeddings)
+                self.rest_distance_threshold = np.percentile(
+                    rest_distances, self.rest_threshold_percentile
+                )
+            else:
+                self.rest_distance_threshold = None
+
         self.fitted = True
 
         return self
@@ -123,7 +142,9 @@ class WoodWideDetector:
     def predict(
         self,
         embeddings: np.ndarray,
-        return_distances: bool = False
+        return_distances: bool = False,
+        labels: Optional[np.ndarray] = None,
+        exercise_labels: Optional[List[int]] = None
     ) -> np.ndarray:
         """
         Detect signal decoupling in new embeddings.
@@ -131,6 +152,8 @@ class WoodWideDetector:
         Args:
             embeddings: Embeddings to analyze, shape (n_samples, embedding_dim)
             return_distances: If True, return (alerts, distances) tuple
+            labels: Activity labels (required for dual-threshold mode)
+            exercise_labels: Exercise label values (default: [2, 3, 4, 7])
 
         Returns:
             Boolean array indicating alerts (True = decoupling detected)
@@ -145,8 +168,17 @@ class WoodWideDetector:
         # Compute distances from normal centroid
         distances = self._compute_distances(embeddings)
 
-        # Alert when distance exceeds threshold
-        alerts = distances > self.distance_threshold
+        # Dual-threshold mode: separate thresholds for exercise vs rest
+        if self.rest_distance_threshold is not None and labels is not None:
+            if exercise_labels is None:
+                exercise_labels = [2, 3, 4, 7]
+            is_exercise = np.isin(labels, exercise_labels)
+            alerts = np.zeros(len(embeddings), dtype=bool)
+            alerts[is_exercise] = distances[is_exercise] > self.distance_threshold
+            alerts[~is_exercise] = distances[~is_exercise] > self.rest_distance_threshold
+        else:
+            # Single-threshold mode (original behavior)
+            alerts = distances > self.distance_threshold
 
         if return_distances:
             return alerts, distances
@@ -172,8 +204,11 @@ class WoodWideDetector:
         # Fit on exercise data
         self.fit(embeddings, labels, exercise_labels)
 
-        # Predict on all data
-        alerts, distances = self.predict(embeddings, return_distances=True)
+        # Predict on all data (pass labels for dual-threshold mode)
+        alerts, distances = self.predict(
+            embeddings, return_distances=True,
+            labels=labels, exercise_labels=exercise_labels
+        )
 
         # Compute metrics
         metrics = self._compute_metrics(alerts, labels, exercise_labels)
@@ -239,7 +274,7 @@ class WoodWideDetector:
             if is_rest.sum() > 0 else 0
         )
 
-        return {
+        metrics = {
             'total_windows': len(alerts),
             'total_alerts': int(total_alerts),
             'alerts_during_exercise': int(alerts_during_exercise),
@@ -250,6 +285,9 @@ class WoodWideDetector:
             'rest_windows': int(is_rest.sum()),
             'threshold': self.distance_threshold
         }
+        if self.rest_distance_threshold is not None:
+            metrics['rest_threshold'] = self.rest_distance_threshold
+        return metrics
 
     def save(self, filepath: str):
         """
@@ -266,6 +304,8 @@ class WoodWideDetector:
             'min_samples_for_fit': self.min_samples_for_fit,
             'normal_centroid': self.normal_centroid,
             'distance_threshold': self.distance_threshold,
+            'rest_threshold_percentile': self.rest_threshold_percentile,
+            'rest_distance_threshold': self.rest_distance_threshold,
             'fitted': self.fitted
         }
 
@@ -288,10 +328,12 @@ class WoodWideDetector:
 
         detector = cls(
             threshold_percentile=state['threshold_percentile'],
-            min_samples_for_fit=state['min_samples_for_fit']
+            min_samples_for_fit=state['min_samples_for_fit'],
+            rest_threshold_percentile=state.get('rest_threshold_percentile')
         )
         detector.normal_centroid = state['normal_centroid']
         detector.distance_threshold = state['distance_threshold']
+        detector.rest_distance_threshold = state.get('rest_distance_threshold')
         detector.fitted = state['fitted']
 
         return detector
@@ -403,3 +445,52 @@ class MultiCentroidDetector(WoodWideDetector):
         if return_distances:
             return alerts, distances
         return alerts
+
+    def fit_predict(
+        self,
+        embeddings: np.ndarray,
+        labels: np.ndarray,
+        exercise_labels: Optional[List[int]] = None
+    ) -> DetectionResult:
+        """
+        Fit multi-centroid detector and predict on the same data.
+
+        Args:
+            embeddings: Embeddings, shape (n_samples, embedding_dim)
+            labels: Activity labels, shape (n_samples,)
+            exercise_labels: Exercise label values (for metrics computation)
+
+        Returns:
+            DetectionResult with alerts, distances, and metrics
+        """
+        self.fit(embeddings, labels)
+        alerts, distances = self.predict(embeddings, labels, return_distances=True)
+        metrics = self._compute_metrics(alerts, labels, exercise_labels)
+
+        # Use mean centroid and mean threshold as representative values
+        overall_centroid = np.mean(
+            list(self.activity_centroids.values()), axis=0
+        )
+        representative_threshold = np.mean(
+            list(self.activity_thresholds.values())
+        )
+
+        return DetectionResult(
+            alerts=alerts,
+            distances=distances,
+            threshold=representative_threshold,
+            normal_centroid=overall_centroid,
+            metrics=metrics
+        )
+
+    def _compute_metrics(
+        self,
+        alerts: np.ndarray,
+        labels: np.ndarray,
+        exercise_labels: Optional[List[int]] = None
+    ) -> Dict:
+        """Compute metrics with per-activity threshold info."""
+        metrics = super()._compute_metrics(alerts, labels, exercise_labels)
+        metrics['per_activity_thresholds'] = dict(self.activity_thresholds)
+        metrics['n_centroids'] = len(self.activity_centroids)
+        return metrics
