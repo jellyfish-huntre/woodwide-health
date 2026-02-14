@@ -51,6 +51,11 @@ class SSLConnectionError(WoodWideAPIError):
     pass
 
 
+class InsufficientCreditsError(WoodWideAPIError):
+    """Raised when the API key has run out of credits (HTTP 402)."""
+    pass
+
+
 class TrainingTimeoutError(WoodWideAPIError):
     """Raised when model training does not complete within the timeout."""
     pass
@@ -246,6 +251,11 @@ class APIClient:
             except requests.exceptions.HTTPError as e:
                 if response.status_code == 401:
                     raise AuthenticationError(f"Authentication failed: {e}")
+                elif response.status_code == 402:
+                    raise InsufficientCreditsError(
+                        "API key has run out of credits. "
+                        "Please add credits or use a different API key."
+                    )
                 elif response.status_code == 429:
                     raise RateLimitError(f"Rate limit exceeded: {e}")
                 elif attempt == self.max_retries - 1:

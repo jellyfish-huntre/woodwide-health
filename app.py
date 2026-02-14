@@ -35,7 +35,7 @@ except FileNotFoundError:
 
 from src.detectors.woodwide import WoodWideDetector, MultiCentroidDetector, DetectionResult
 from src.detectors.isolation_forest_detector import IsolationForestDetector
-from src.embeddings.api_client import MockAPIClient
+from src.embeddings.api_client import MockAPIClient, InsufficientCreditsError
 from src.embeddings.generate import send_windows_to_woodwide
 from src.ingestion.preprocess import PPGDaLiaPreprocessor
 from streamlit_helpers import (
@@ -64,6 +64,21 @@ from app_content import (
     FAILURE_CARDS
 )
 import io
+
+
+@st.dialog("API Key Out of Credits")
+def api_key_credits_dialog():
+    """Show dialog when API key has insufficient credits."""
+    st.warning("Your API key has run out of credits.")
+    new_key = st.text_input("Enter a new API key:", type="password")
+    if st.button("Save"):
+        if new_key.strip():
+            os.environ["WOOD_WIDE_API_KEY"] = new_key.strip()
+            st.session_state["api_key_updated"] = True
+            st.rerun()
+        else:
+            st.error("Please enter a valid API key.")
+
 
 # Page config
 st.set_page_config(
@@ -2262,6 +2277,10 @@ def main():
                     load_embeddings.clear()
 
                     status.update(label="Embeddings generated!", state="complete", expanded=False)
+                except InsufficientCreditsError:
+                    status.update(label="Embedding generation failed", state="error")
+                    api_key_credits_dialog()
+                    return
                 except Exception as e:
                     status.update(label="Embedding generation failed", state="error")
                     st.error(f"[ERROR] Failed to generate embeddings: {e}")
